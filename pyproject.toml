@@ -1,0 +1,9 @@
+[project]
+name = "sqlite-parser-local"
+version = "0.1.0"
+description = "Minimal local SQLite parser for experimentation"
+requires-python = ">=3.10"
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
