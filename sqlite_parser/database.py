@@ -25,7 +25,7 @@ BTreePageHeader = Union[BTreeInteriorPageHeader, BTreeLeafPageHeader]
 b_tree_interior_page_header: p.Parser[BTreeInteriorPageHeader] = p.create_parser_from_dataclass(BTreeInteriorPageHeader)
 b_tree_leaf_page_header: p.Parser[BTreeLeafPageHeader] = p.create_parser_from_dataclass(BTreeLeafPageHeader)
 
-def b_tree_page_header(stream: p.Stream) -> p.Result[BTreePageHeader]:
+def b_tree_page_header(state: p.ParserState) -> p.Result[BTreePageHeader]:
     """
     Parses a B-Tree page header by first peeking at the page type
     and then choosing the appropriate parser.
@@ -43,13 +43,13 @@ def b_tree_page_header(stream: p.Stream) -> p.Result[BTreePageHeader]:
             header = yield b_tree_leaf_page_header
             return header
 
-    return _parse_header()(stream)
+    return _parse_header()(state)
 
 
 def cell_pointer_array(cell_count: int) -> p.Parser[list[int]]:
     return p.count(cell_count, p.uint16_be)
 
-def varint(stream: p.Stream) -> p.Result[int]:
+def varint(state: p.ParserState) -> p.Result[int]:
     def process_bytes(parts):
         head, tail = parts
         initial_value = reduce(lambda acc, byte: (acc << 7) | (byte & 0x7F), head, 0)
@@ -60,7 +60,7 @@ def varint(stream: p.Stream) -> p.Result[int]:
     parser = p.sequence(p.many(continuation_byte), final_byte)
 
     # TODO: check case where 9 bytes are read
-    return p.map_p(process_bytes, parser)(stream)
+    return p.map_p(process_bytes, parser)(state)
 
 @dataclass
 class Record:
@@ -163,7 +163,7 @@ def parse_record_body(serial_types: list[int]) -> p.Parser[list[ColumnValue]]:
             text_len = (st - 12) // 2
             parsers.append(p.map_p(lambda b: b.decode(), p.bytes_n(text_len)))
         else:
-            raise ValueError(f"Unknown serial type: {st}")
+            p.failure(f"Unknown serial type: {st}")
 
     return p.sequence(*parsers)
 
@@ -230,7 +230,8 @@ def _parse_page_for_leaf(page_size: int, page_num: int) -> Generator[p.Parser, A
     else:
         # We are assuming we only encounter table leaf or interior pages.
         # Other page types like index pages would need to be handled here.
-        raise TypeError(f"Unsupported page type for traversal: {page_type}")
+        yield p.failure(f"Unsupported page type for traversal: {page_type}")
+        return  # type: ignore
 
 
 @p.do
