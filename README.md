@@ -12,6 +12,7 @@ This parser is designed to read a SQLite database file (like the included `chino
 - **Lazy Evaluation:** The parser uses a `lazy` combinator to defer the parsing of expensive table record payloads. The payload is only parsed from the byte stream when its value is explicitly requested, making initial loading very fast.
 - **Declarative Grammar (`database.py`):** The SQLite file format grammar is defined declaratively using the combinator library. This makes the code highly readable and closely mirrors the official SQLite documentation.
 - **B-Tree Traversal:** The parser can walk the database's B-Tree structure, starting from the root page, to locate the first leaf page where table data is stored.
+- **Composable Parsing with Anchors:** To solve the problem of absolute seeks breaking parser composability, the library uses an "anchor" system. An `anchor` establishes a new local frame of reference, allowing all subsequent seeks to be relative. This makes parsers modular, reusable, and easier to reason about.
 
 ## Analysis
 
@@ -23,7 +24,10 @@ This parser is designed to read a SQLite database file (like the included `chino
 ### Cons
 - **Performance:** As a pure Python implementation running on CPython, it will be significantly slower than production-grade parsers written in systems languages like C or Rust. This is expected for a project of this nature.
 - **Error Reporting:** Error messages are currently basic. A production-ready parser would require more sophisticated error reporting to provide better context on failures.
-- **Composability with Absolute Seeks:** As noted in the source code, the use of absolute `seek` calls can break the composability of parsers, making them less modular and harder to reason about. This could be solved by restricting parsers to relative seeks and introducing an `anchor` combinator to establish new local frames of reference.  
+
+## Roadmap
+
+- **`dissect.cstruct` Adapters:** To dramatically improve performance, we plan to introduce adapters that leverage the `dissect.cstruct` library for parsing binary data. This will allow us to replace pure Python parsing functions with highly optimized implementations where possible, while still retaining the declarative, high-level structure of the parser-combinator library.
 
 ## Quickstart
 

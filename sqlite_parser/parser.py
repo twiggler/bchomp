@@ -1,4 +1,4 @@
-from typing import Any, Callable, Generator, Generic, TypeVar, TypeVarTuple, Union, Optional, Protocol, IO, get_args, TYPE_CHECKING
+from typing import Any, Callable, Generator, Generic, Self, TypeVar, TypeVarTuple, Union, Optional, Protocol, IO, get_args, TYPE_CHECKING
 from functools import wraps
 import struct
 import os
@@ -77,9 +77,10 @@ class BinaryIOReader:
 
 
 class Stream:
-    def __init__(self, data: Readable, pos: int = 0):
+    def __init__(self, data: Readable, pos: int = 0, anchors: Optional[list[int]] = None):
         self.data = data
         self.pos = pos
+        self.anchors = anchors or []
 
     def __len__(self):
         return len(self.data)
@@ -121,29 +122,113 @@ def any_byte(stream: Stream) -> Result[int]:
     return Failure("End of stream", stream)
 
 
-def seek(pos: int) -> Parser[None]:
+def seek_absolute(pos: int) -> Parser[None]:
+    """
+    Moves the stream to an absolute position.
+
+    Warning: This is a low-level and dangerous operation that breaks parser
+    composability. A parser that uses `seek_absolute` cannot be safely
+    used inside other combinators like `choice` or `many`, as it makes
+    backtracking impossible.
+
+    This should only be used for top-level parsing tasks, such as jumping
+    to an initial offset from the start of a file. For all other purposes,
+    use the composable `anchor` and `seek` combinators.
+    """
     def _seek(stream: Stream) -> Result[None]:
-        if pos < len(stream.data):
-            return Success(None, Stream(stream.data, pos))
-        return Failure(f"Cannot seek to {pos}", stream)
+        if 0 <= pos < len(stream.data):
+            return Success(None, Stream(stream.data, pos, anchors=stream.anchors))
+        return Failure(f"Cannot seek to absolute position {pos}", stream)
 
     return _seek
 
 
-def seek_relative(offset: int) -> Parser[None]:
-    """Advance the stream position by `offset` (can be negative).
-
-    This is similar to file-like relative seek semantics but restricted
-    to the in-memory `Stream`. If the resulting position would be out
-    of bounds, returns a `Failure`.
+def seek(offset: int) -> Parser[None]:
+    """
+    Moves the stream to a position relative to the current anchor.
+    If no anchor is set, seeks relative to the start of the stream.
+    This operation is safe, composable, and allows for backtracking.
     """
     def _seek_rel(stream: Stream) -> Result[None]:
-        new_pos = stream.pos + offset
+        base_pos = stream.anchors[-1] if stream.anchors else 0
+        new_pos = base_pos + offset
+
         if 0 <= new_pos < len(stream.data):
-            return Success(None, Stream(stream.data, new_pos))
-        return Failure(f"Cannot seek relative by {offset} from {stream.pos}", stream)
+            return Success(None, Stream(stream.data, new_pos, anchors=stream.anchors))
+        
+        msg = f"Cannot seek to offset {offset} from anchor {base_pos}"
+        return Failure(msg, stream)
 
     return _seek_rel
+
+
+def anchor(p: Parser[T]) -> Parser[T]:
+    """
+    A combinator that creates a new local frame of reference for seeking.
+
+    It runs a parser `p` within an "anchored" context. Any `seek` calls
+    inside `p` will be relative to the stream position where the anchor
+    was created. This allows for composable, relocatable parsers that can
+    perform seeks without breaking backtracking.
+    """
+    def _anchor(stream: Stream) -> Result[T]:
+        # 1. Create a new stream with the current position added to the anchor stack.
+        anchored_stream = Stream(stream.data, stream.pos, anchors=[*stream.anchors, stream.pos])
+
+        # 2. Run the wrapped parser in this new anchored context.
+        result = p(anchored_stream)
+
+        if isinstance(result, Failure):
+            # On failure, we return the failure but with the *original* stream,
+            # preserving the backtracking contract.
+            return Failure(result.message, stream)
+
+        # 3. On success, calculate bytes consumed inside the anchor and advance
+        # the outer stream by that amount, discarding the anchor.
+        bytes_consumed = result.stream.pos - stream.pos
+        final_stream = Stream(stream.data, stream.pos + bytes_consumed, anchors=stream.anchors)
+        return Success(result.value, final_stream)
+
+    return _anchor
+
+
+class AnchorContextManager:
+    """
+    A parser-aware context manager for creating temporary anchor points.
+
+    This is designed to be used within a `do`-block. Yielding this object
+    returns a context manager that can be used with a `with` statement.
+    The `__enter__` and `__exit__` methods of the returned manager are themselves
+    parsers that handle the anchor stack.
+    """
+    def __enter__(self) -> Parser[None]:
+        """
+        Returns a parser that, when yielded, pushes the current stream
+        position onto the anchor stack.
+        """
+        def _enter(stream: Stream) -> Result[None]:
+            anchored_stream = Stream(stream.data, stream.pos, anchors=[*stream.anchors, stream.pos])
+            return Success(None, anchored_stream)
+        return _enter
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> Parser[None]:
+        """
+        Returns a parser that, when yielded, pops the most recent anchor
+        from the stack, preserving the stream position.
+        """
+        def _exit(stream: Stream) -> Result[None]:
+            if not stream.anchors:
+                return Failure("Cannot exit anchor context: no anchor on the stack.", stream)
+            
+            # The stream position is preserved, only the anchor stack is modified.
+            new_stream = Stream(stream.data, stream.pos, anchors=stream.anchors[:-1])
+            return Success(None, new_stream)
+        return _exit
+
+    def __call__(self) -> Parser[Self]:
+        return lambda stream: Success(self, stream)
+
+anchor_cm = AnchorContextManager()
 
 
 def satisfy(predicate: Callable[[int], bool]) -> Parser[int]:
@@ -468,26 +553,38 @@ def lazy(
     parser: Callable[[int], Parser[T]],
 ) -> Generator[Parser, Any, Lazy[T]]:
     """
-    Parses a sequence where a block of data is evaluated lazily.
-  
-    The main stream is advanced past the entire content block, while the lazy thunk
-    gets a separate stream positioned at the start of the content block.
+    Creates a lazy-evaluated value by parsing a block of a given size.
+
+    This combinator is essential for performance. It immediately skips the
+    main stream forward by `size` bytes, while returning a `Lazy` object.
+    The actual parsing of the content block is deferred until the `.value`
+    of the `Lazy` object is accessed for the first time.
+
+    This uses the `take` combinator internally to provide a safe, isolated
+    stream for the deferred parsing.
     """
-    # The size_parser tells us the size of the content that follows it.
+    # We will use the `take` combinator to consume `size` bytes from the
+    # main stream and run a parser on that isolated block.
+    #
+    # However, we don't want to run the parser *now*. We want to run it
+    # later. So, we create a simple "parser" that just captures the sub-stream
+    # and returns it.
+    sub_stream_parser = get_stream()
     
-    lazy_content_stream = yield get_stream()
-   
-    def lazy_thunk():
-        # When the thunk is called, it creates a new stream at the correct
-        # starting position for the lazy content.
+    # `take` will run `get_stream` on an isolated sub-stream of `size` bytes.
+    # The result, `lazy_content_stream`, will be a Stream object whose data
+    # is only the `size` bytes we skipped over.
+    lazy_content_stream = yield take(size, sub_stream_parser)
+
+    def lazy_thunk() -> T:
+        # When the thunk is finally called, it runs the real parser on the
+        # captured, isolated sub-stream.
         result = parser(size)(lazy_content_stream)
         if isinstance(result, Failure):
-            raise ValueError(f"Failed to parse lazy content: {result}")
+            # If parsing fails, raise an exception to signal the problem.
+            raise ValueError(f"Failed to parse lazy content: {result.message}")
         return result.value
 
-    lazy_value = Lazy(lazy_thunk)
-
-    # Advance the main stream past the entire content block.
-    yield seek_relative(size)
-
-    return lazy_value
+    # Return a Lazy object containing the thunk. The main stream has already
+    # been advanced by `take`.
+    return Lazy(lazy_thunk)

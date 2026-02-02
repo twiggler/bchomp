@@ -167,56 +167,82 @@ def parse_record_body(serial_types: list[int]) -> p.Parser[list[ColumnValue]]:
 
     return p.sequence(*parsers)
 
-@dataclass
-class BTreePage:
-    """Represents a parsed B-Tree page, containing its header and starting position."""
-    header: BTreePageHeader
-    page_start: int
+def get_page_offset(page_num: int, page_size: int) -> int:
+    """Calculates the absolute byte offset of a given page number."""
+    if page_num <= 0:
+        raise ValueError(f"Invalid page number: {page_num}")
+    offset = (page_num - 1) * page_size
+    if page_num == 1:
+        offset += 100   # TODO: Replace with header size constant
+    return offset
 
-def find_first_leaf_page(page_num: int, page_size: int) -> p.Parser[BTreePage]:
+
+def find_first_leaf_page(page_num: int, page_size: int) -> p.Parser[int]:
     """
-    A recursive parser that traverses a B-Tree to find the first leaf page.
-
-    Starting from the given `page_num`, it checks the page type. If it's an
-    interior page, it finds the left-most child pointer and recurses. If it's
-    a leaf page, it returns the parsed page.
+    A recursive, composable parser that traverses a B-Tree to find the page
+    number of the first leaf page.
     """
     
     @p.do
-    def _traverse() -> Generator[p.Parser, Any, BTreePage]:
-        if page_num <= 0:
-            raise ValueError(f"Invalid page number: {page_num}")
-
-        page_start = (page_num - 1) * page_size
-        offset = 100 if page_num == 1 else 0
+    def _traverse() -> Generator[p.Parser, Any, int]:
+        page_start = get_page_offset(page_num, page_size)
         
-        # TODO: allowing absolute seeks breaks composability.
-        # Having to store page_start is in BTreePage is also a workaround.
-        # Support a stack of anchors to create a local frame of reference for seeks? 
-        yield p.seek(page_start + offset)
-        
-        header = yield b_tree_page_header
+        yield p.seek(page_start)
 
-        if isinstance(header, BTreeLeafPageHeader):
-            return BTreePage(header=header, page_start=page_start)
-
-        elif isinstance(header, BTreeInteriorPageHeader):
-            # This is an interior page, we need to go deeper.
-            # The cell pointers are right after the header.
-            cell_pointers = yield cell_pointer_array(header.cell_count)
-            
-            # The first cell pointer gives the location of the left-most child cell.
-            first_cell_ptr_offset = cell_pointers[0]
-            
-            # Seek to that cell's location to parse the child page number.
-            yield p.seek(page_start + first_cell_ptr_offset)
-            child_page_num = yield table_interior_cell()
-            
-            # Recursively call the traversal parser on the child page.
-            result = yield find_first_leaf_page(child_page_num, page_size)
+        # All operations for parsing this page are now done inside a *new*
+        # nested anchor, making them relative to the start of the page.
+        with (yield p.anchor_cm()):
+            result = yield _parse_page_for_leaf(page_size, page_num)
             return result
-        else:
-            # This should not happen with the current header parsing logic
-            raise TypeError(f"Unknown header type: {type(header)}")
 
     return _traverse()
+
+
+@p.do
+def _parse_page_for_leaf(page_size: int, page_num: int) -> Generator[p.Parser, Any, int]:
+    """
+    Helper parser that operates within a nested anchor set to the start of a page.
+    All seeks are relative to the start of the current page.
+    Returns the page number of a leaf page.
+    """
+    page_type = yield p.peek(p.uint8)
+
+    if page_type == 10: # TODO: Make Table Leaf index constant
+        return page_num
+    elif page_type == 5: # TODO: Make Table Interior index constant
+        # This is an interior page, so we parse its header to find the
+        # left-most child pointer and continue traversal.
+        header = yield b_tree_interior_page_header
+        
+        cell_pointers = yield cell_pointer_array(header.cell_count)
+        
+        # The first cell pointer gives the location of the left-most child cell,
+        # relative to the start of the page (our current anchor).
+        first_cell_ptr_offset = cell_pointers[0]
+        
+        yield p.seek(first_cell_ptr_offset)
+        child_page_num = yield table_interior_cell()
+        
+        # Recursively call the traversal parser. Since we are no longer in the
+        # nested page anchor, this will operate relative to the file anchor.
+        result = yield find_first_leaf_page(child_page_num, page_size)
+        return result
+    else:
+        # We are assuming we only encounter table leaf or interior pages.
+        # Other page types like index pages would need to be handled here.
+        raise TypeError(f"Unsupported page type for traversal: {page_type}")
+
+
+@p.do
+def parse_leaf_page(page_num: int, page_size: int) -> Generator[p.Parser, Any, tuple[BTreeLeafPageHeader, list[int]]]:
+    """
+    Parses a given leaf page, returning its header and cell pointers.
+    Assumes it is running in a file-level anchor context.
+    """
+    page_start = get_page_offset(page_num, page_size)
+    yield p.seek(page_start)
+
+    with (yield p.anchor_cm()):
+        header = yield b_tree_leaf_page_header
+        cell_pointers = yield cell_pointer_array(header.cell_count)
+        return header, cell_pointers
