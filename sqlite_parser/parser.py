@@ -107,14 +107,6 @@ Result = Union[Success[T], Failure]
 Parser = Callable[[Stream], Result[T]]
 
 
-def parser(fn: Callable[..., Parser[R]]) -> Callable[..., Parser[R]]:
-    @wraps(fn)
-    def wrapper(*args, **kwargs) -> Parser[R]:
-        return fn(*args, **kwargs)
-
-    return wrapper
-
-
 def run_parser(parser: Parser[T], data: Readable) -> Result[T]:
     stream = Stream(data)
     return parser(stream)
@@ -129,7 +121,6 @@ def any_byte(stream: Stream) -> Result[int]:
     return Failure("End of stream", stream)
 
 
-@parser
 def seek(pos: int) -> Parser[None]:
     def _seek(stream: Stream) -> Result[None]:
         if pos < len(stream.data):
@@ -139,7 +130,6 @@ def seek(pos: int) -> Parser[None]:
     return _seek
 
 
-@parser
 def seek_relative(offset: int) -> Parser[None]:
     """Advance the stream position by `offset` (can be negative).
 
@@ -156,7 +146,6 @@ def seek_relative(offset: int) -> Parser[None]:
     return _seek_rel
 
 
-@parser
 def satisfy(predicate: Callable[[int], bool]) -> Parser[int]:
     def _satisfy(stream: Stream) -> Result[int]:
         result = any_byte(stream)
@@ -169,12 +158,10 @@ def satisfy(predicate: Callable[[int], bool]) -> Parser[int]:
     return _satisfy
 
 
-@parser
 def byte(b: int) -> Parser[int]:
     return satisfy(lambda x: x == b)
 
 
-@parser
 def bytes_n(n: int) -> Parser[bytes]:
     def _bytes_n(stream: Stream) -> Result[bytes]:
         start = stream.pos
@@ -341,7 +328,6 @@ def make_lazy(proto: type, lazy_fields: list[str]) -> type:
     return new_class
 
 
-@parser
 def position() -> Parser[int]:
     """
     A parser that consumes no input and returns the current position
@@ -353,7 +339,6 @@ def position() -> Parser[int]:
     return _position
 
 
-@parser
 def get_stream() -> Parser[Stream]:
     """
     A parser that consumes no input and returns the current stream object.
@@ -364,7 +349,6 @@ def get_stream() -> Parser[Stream]:
     return _get_stream
 
 
-@parser
 def peek(p: Parser[T]) -> Parser[T]:
     """
     Runs a parser `p` without consuming any input.

@@ -46,7 +46,6 @@ def b_tree_page_header(stream: p.Stream) -> p.Result[BTreePageHeader]:
     return _parse_header()(stream)
 
 
-@p.parser
 def cell_pointer_array(cell_count: int) -> p.Parser[list[int]]:
     return p.count(cell_count, p.uint16_be)
 
