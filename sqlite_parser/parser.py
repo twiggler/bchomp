@@ -384,56 +384,55 @@ def string(s: str) -> Parser[str]:
 
 def make_lazy(proto: type, lazy_fields: list[str]) -> type:
     """
-    Dynamically creates a dataclass that implements a given protocol,
-    but with specified fields converted to lazy-loading properties.
-
-    Args:
-        proto: A class (ideally a Protocol) defining the desired fields and types.
-        lazy_fields: A list of field names from the protocol that should be lazy.
-
-    Returns:
-        A new dataclass type with lazy-loading capabilities.
+    Dynamically creates a plain class that implements a protocol with some
+    fields being lazy. The constructor accepts public field names.
     """
-    # Get the annotations from the protocol. 
-    attrs = getattr(proto, '__annotations__', {})
+    if not hasattr(proto, "__annotations__"):
+        raise TypeError(f"{proto.__name__} is not a valid protocol for lazy loading.")
 
-    # Prepare fields for the new dataclass
-    new_class_fields = []
-    # Store info for creating properties later
-    property_map = {}
+    all_fields = list(proto.__annotations__.keys())
 
-    for name, field_type in attrs.items():
-        if name in lazy_fields:
-            # For lazy fields, the internal storage will be a Lazy[T]
-            # The field name in the dataclass is prefixed to avoid clashes
-            internal_name = f"_{name}_lazy"
-            new_class_fields.append((internal_name, Lazy[field_type]))
+    def __init__(self, **kwargs):
+        """
+        Initializes the object, mapping public lazy field names (e.g., 'payload')
+        to their internal storage (e.g., '_payload_lazy').
+        """
+        for key, value in kwargs.items():
+            if key in lazy_fields:
+                # Store the Lazy object in the internal attribute.
+                setattr(self, f"_{key}_lazy", value)
+            else:
+                # Set regular attributes directly.
+                setattr(self, key, value)
 
-            # The property will provide transparent access to the lazy value
-            def make_prop(internal_name):
-                return property(lambda self: getattr(self, internal_name).value)
+    # The `attrs` dictionary will form the body of our new class.
+    attrs: dict[str, Any] = {"__init__": __init__}
 
-            property_map[name] = make_prop(internal_name)
-        else:
-            # Regular fields are added as-is
-            new_class_fields.append((name, field_type))
+    # For each lazy field, create a property that evaluates the lazy value on access.
+    for field in lazy_fields:
+        internal_name = f"_{field}_lazy"
+        
+        # The property uses the `.value` attribute of our `Lazy` class,
+        # which already handles the caching internally.
+        attrs[field] = property(lambda self, name=internal_name: getattr(self, name).value)
 
-    # Create the new dataclass
-    new_class = dataclasses.make_dataclass(
-        f"{proto.__name__}Implementation",
-        fields=new_class_fields,
-    )
+    # Add a __repr__ for better debugging output.
+    def __repr__(self):
+        parts = []
+        for name in all_fields:
+            if name in lazy_fields:
+                val = getattr(self, f"_{name}_lazy")
+                parts.append(f"{name}={val!r}")
+            else:
+                val = getattr(self, name)
+                parts.append(f"{name}={val!r}")
+        return f"Lazy{proto.__name__}({', '.join(parts)})"
 
-    # Add the lazy properties to the new class
-    for name, prop in property_map.items():
-        setattr(new_class, name, prop)
+    attrs["__repr__"] = __repr__
 
-    # This helps type checkers understand the relationship
-    if TYPE_CHECKING:
-        # In a type-checking context, we can assert it implements the protocol
-        assert issubclass(new_class, proto)
-
-    return new_class
+    # Create the new class dynamically using type().
+    new_class_name = f"Lazy{proto.__name__}"
+    return type(new_class_name, (), attrs)
 
 
 def position() -> Parser[int]:

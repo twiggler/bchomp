@@ -126,7 +126,7 @@ def create_table_leaf_cell_parser() -> Callable[[], p.Parser[TableLeafCell]]:
         
         lazy_cell_payload_value = yield p.lazy(size, record)
         
-        return LazyTableCell(rowid=row_id, _payload_lazy=lazy_cell_payload_value)
+        return LazyTableCell(rowid=row_id, payload=lazy_cell_payload_value)
     
     return table_leaf_cell
 
