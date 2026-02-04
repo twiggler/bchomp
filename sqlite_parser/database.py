@@ -1,7 +1,16 @@
 from dataclasses import dataclass
 from sqlite_parser import parser as p
 from functools import reduce
-from typing import Any, Protocol, Callable, Annotated, Generator, Union
+from typing import Any, Callable, Annotated, Generator, Union, Iterator
+from enum import IntEnum
+
+
+class PageType(IntEnum):
+    INDEX_INTERIOR = 2
+    TABLE_INTERIOR = 5
+    INDEX_LEAF = 10
+    TABLE_LEAF = 13
+
 
 @dataclass
 class BTreeInteriorPageHeader:
@@ -12,6 +21,7 @@ class BTreeInteriorPageHeader:
     fragmented_bytes: Annotated[int, p.uint8]
     right_most_pointer: Annotated[int, p.uint32_be]
 
+
 @dataclass
 class BTreeLeafPageHeader:
     page_type: Annotated[int, p.uint8]
@@ -20,34 +30,16 @@ class BTreeLeafPageHeader:
     cell_start: Annotated[int, p.uint16_be]
     fragmented_bytes: Annotated[int, p.uint8]
 
+
 BTreePageHeader = Union[BTreeInteriorPageHeader, BTreeLeafPageHeader]
 
 b_tree_interior_page_header: p.Parser[BTreeInteriorPageHeader] = p.create_parser_from_dataclass(BTreeInteriorPageHeader)
 b_tree_leaf_page_header: p.Parser[BTreeLeafPageHeader] = p.create_parser_from_dataclass(BTreeLeafPageHeader)
 
-def b_tree_page_header(state: p.ParserState) -> p.Result[BTreePageHeader]:
-    """
-    Parses a B-Tree page header by first peeking at the page type
-    and then choosing the appropriate parser.
-    """
-    
-    @p.do
-    def _parse_header() -> Generator[p.Parser, Any, BTreePageHeader]:
-        page_type = yield p.peek(p.uint8)
-
-        if page_type == 5:
-            header = yield b_tree_interior_page_header
-            return header
-        else:
-            # Assume leaf page for any other type for now
-            header = yield b_tree_leaf_page_header
-            return header
-
-    return _parse_header()(state)
-
 
 def cell_pointer_array(cell_count: int) -> p.Parser[list[int]]:
     return p.count(cell_count, p.uint16_be)
+
 
 def varint(state: p.ParserState) -> p.Result[int]:
     def process_bytes(parts):
@@ -62,10 +54,12 @@ def varint(state: p.ParserState) -> p.Result[int]:
     # TODO: check case where 9 bytes are read
     return p.map_p(process_bytes, parser)(state)
 
+
 @dataclass
 class Record:
     serial_types: list[int]
-    values: list[ColumnValue]
+    values: list['ColumnValue']
+
 
 @p.do
 def record_header() -> Generator[p.Parser, Any, tuple[int, list[int]]]:
@@ -76,16 +70,15 @@ def record_header() -> Generator[p.Parser, Any, tuple[int, list[int]]]:
     - The total size of the header in bytes (including the size varint).
     - A list of the serial types.
     """
-    start_pos = yield p.position()
-    total_header_size = yield varint
-    end_pos = yield p.position()
+    
+    total_header_size, varint_size = yield p.with_bytes_read(varint)
 
-    varint_size = end_pos - start_pos
     header_content_size = total_header_size - varint_size
 
     header_content = yield p.take(header_content_size, p.many(varint))
 
     return total_header_size, header_content
+
 
 @p.do
 def record(payload_size: int) -> Generator[p.Parser, Any, Record]:
@@ -98,6 +91,7 @@ def record(payload_size: int) -> Generator[p.Parser, Any, Record]:
     
     return Record(serial_types=header_content, values=values)
 
+
 @p.do
 def table_interior_cell() -> Generator[p.Parser, Any, int]:
     """
@@ -108,29 +102,25 @@ def table_interior_cell() -> Generator[p.Parser, Any, int]:
     We only need the page number for our traversal.
     """
     page_number = yield p.uint32_be
+    _ = yield varint  # We don't need the key, but we must parse it to advance the stream.
     return page_number
 
 
-class TableLeafCell(Protocol):
+@dataclass
+class TableLeafCell:
     rowid: int
     payload: Record
 
-def create_table_leaf_cell_parser() -> Callable[[], p.Parser[TableLeafCell]]:
-    LazyTableCell = p.make_lazy(TableLeafCell, lazy_fields=["payload"])
-
-    @p.do
-    def table_leaf_cell() -> Generator[p.Parser, Any, TableLeafCell]:
-        size = yield varint
-
-        row_id = yield varint
-        
-        lazy_cell_payload_value = yield p.lazy(size, record)
-        
-        return LazyTableCell(rowid=row_id, payload=lazy_cell_payload_value)
+@p.do
+def table_leaf_cell() -> Generator[p.Parser, Any, TableLeafCell]:
+    payload_size = yield varint
+    row_id = yield varint
     
-    return table_leaf_cell
-
-table_leaf_cell = create_table_leaf_cell_parser()
+    # The payload of a table leaf cell is a record.
+    # We can parse it directly since we know its size.
+    payload = yield p.take(payload_size, record(payload_size))
+    
+    return TableLeafCell(rowid=row_id, payload=payload)
 
 
 ColumnValue = Union[int, None, bytes, str]
@@ -145,6 +135,7 @@ serial_type_parsers: dict[int, p.Parser[ColumnValue]] = {
     4: p.map_p(lambda b: int.from_bytes(b, 'big', signed=True), p.bytes_n(4)), # 32-bit integer
     5: p.map_p(lambda b: int.from_bytes(b, 'big', signed=True), p.bytes_n(6)), # 48-bit integer
 }
+
 
 def parse_record_body(serial_types: list[int]) -> p.Parser[list[ColumnValue]]:
     """
@@ -163,87 +154,109 @@ def parse_record_body(serial_types: list[int]) -> p.Parser[list[ColumnValue]]:
             text_len = (st - 12) // 2
             parsers.append(p.map_p(lambda b: b.decode(), p.bytes_n(text_len)))
         else:
-            p.failure(f"Unknown serial type: {st}")
+            return p.failure(f"Unknown serial type: {st}")
 
     return p.sequence(*parsers)
 
-def get_page_offset(page_num: int, page_size: int) -> int:
-    """Calculates the absolute byte offset of a given page number."""
-    if page_num <= 0:
-        raise ValueError(f"Invalid page number: {page_num}")
-    offset = (page_num - 1) * page_size
-    if page_num == 1:
-        offset += 100   # TODO: Replace with header size constant
-    return offset
-
-
-def find_first_leaf_page(page_num: int, page_size: int) -> p.Parser[int]:
+def traverse_and_parse_leaf_pages(page_num: int, page_size: int) -> p.Parser[list[LeafPage]]:
     """
-    A recursive, composable parser that traverses a B-Tree to find the page
-    number of the first leaf page.
+    A recursive parser that traverses a B-Tree and returns a list of
+    all parsed TABLE_LEAF pages, ignoring index pages.
     """
     
     @p.do
-    def _traverse() -> Generator[p.Parser, Any, int]:
-        page_start = get_page_offset(page_num, page_size)
+    def _traverse(current_page_num: int) -> Generator[p.Parser, Any, list[LeafPage]]:
+        page_start = (current_page_num - 1) * page_size
+        offset = 100 if current_page_num == 1 else 0
+        yield p.seek(page_start + offset)
+
+        page_type_val = yield p.peek(p.uint8)
+        page_type = PageType(page_type_val) # TODO: Create IntEnum parser
+
+        if page_type == PageType.TABLE_LEAF:
+            # This is a table leaf page, parse it and return.
+            leaf_page = yield p.with_anchor(parse_leaf_page(offset, page_size))
+            return [leaf_page]
+
+        elif page_type == PageType.TABLE_INTERIOR:
+            # This is a table interior page. Get the child pointers to recurse.
+            child_page_pointers = yield p.with_anchor(parse_interior_page_child_pointers(offset))
+            found_pages = []
+            for child_page_num in child_page_pointers:
+                child_results = yield _traverse(child_page_num)
+                found_pages.extend(child_results)
         
-        yield p.seek(page_start)
+            return found_pages
+        else:
+            # This is an index page or other type we don't care about.
+            # Stop traversing this branch by returning an empty list.
+            return []
 
-        # All operations for parsing this page are now done inside a *new*
-        # nested anchor, making them relative to the start of the page.
-        with (yield p.anchor_cm()):
-            result = yield _parse_page_for_leaf(page_size, page_num)
-            return result
+        # We can now safely recurse for the children we found.
+       
 
-    return _traverse()
+    return _traverse(page_num)
 
 
 @p.do
-def _parse_page_for_leaf(page_size: int, page_num: int) -> Generator[p.Parser, Any, int]:
+def parse_interior_page_child_pointers(offset : int) -> Generator[p.Parser, Any, list[int]]:
     """
-    Helper parser that operates within a nested anchor set to the start of a page.
-    All seeks are relative to the start of the current page.
-    Returns the page number of a leaf page.
+    Parses an interior page to extract all child page pointers.
+    This must be run inside a page-level anchor.
     """
-    page_type = yield p.peek(p.uint8)
-
-    if page_type == 10: # TODO: Make Table Leaf index constant
-        return page_num
-    elif page_type == 5: # TODO: Make Table Interior index constant
-        # This is an interior page, so we parse its header to find the
-        # left-most child pointer and continue traversal.
-        header = yield b_tree_interior_page_header
-        
-        cell_pointers = yield cell_pointer_array(header.cell_count)
-        
-        # The first cell pointer gives the location of the left-most child cell,
-        # relative to the start of the page (our current anchor).
-        first_cell_ptr_offset = cell_pointers[0]
-        
-        yield p.seek(first_cell_ptr_offset)
+    header = yield b_tree_interior_page_header
+    
+    cell_pointers = yield cell_pointer_array(header.cell_count)
+    
+    child_pages = []
+    for cell_ptr_offset in cell_pointers:
+        yield p.seek(cell_ptr_offset - offset)
         child_page_num = yield table_interior_cell()
+        child_pages.append(child_page_num)
         
-        # Recursively call the traversal parser. Since we are no longer in the
-        # nested page anchor, this will operate relative to the file anchor.
-        result = yield find_first_leaf_page(child_page_num, page_size)
-        return result
-    else:
-        # We are assuming we only encounter table leaf or interior pages.
-        # Other page types like index pages would need to be handled here.
-        yield p.failure(f"Unsupported page type for traversal: {page_type}")
-        return  # type: ignore
+    # For interior pages, we also need to include the right-most pointer.
+    child_pages.append(header.right_most_pointer)
+    
+    return child_pages
+
+
+@dataclass
+class LeafPage:
+    header: BTreeLeafPageHeader
+    cells: p.Lazy[list[TableLeafCell]]
 
 
 @p.do
-def parse_leaf_page(page_num: int, page_size: int) -> Generator[p.Parser, Any, tuple[BTreeLeafPageHeader, list[int]]]:
+def parse_leaf_page(offset: int, page_size: int) -> Generator[p.Parser, Any, LeafPage]:
     """
-    Parses a given leaf page, returning its header and cell pointers.
-    Assumes it is running in a file-level anchor context.
+    Parses a leaf page, returning a `LeafPage` object with a lazily-evaluated
+    list of cells.
     """
-    page_start = get_page_offset(page_num, page_size)
-    yield p.seek(page_start)
+    
+    header, header_size = yield p.with_bytes_read(b_tree_leaf_page_header)
 
-    with (yield p.anchor_cm()):
-        header = yield b_tree_leaf_page_header
-        cell_pointers = yield cell_pointer_array(header.cell_count)
-        return header, cell_pointers
+    lazy_cells = yield p.lazy(
+        page_size - header_size,
+        lambda _: parse_leaf_page_cells(header.cell_count, offset),
+    )
+
+    return LeafPage(header=header, cells=lazy_cells)
+
+
+@p.do
+def parse_leaf_page_cells(
+    cell_count: int, offset: int
+) -> Generator[p.Parser, Any, list[TableLeafCell]]:
+    """
+    Parses all cells in a leaf page.
+    This must be run inside a page-level anchor, positioned after the header.
+    """
+    cell_pointers = yield cell_pointer_array(cell_count)
+
+    cells = []
+    for cell_ptr_offset in cell_pointers:
+        yield p.seek(cell_ptr_offset - offset)
+        cell = yield table_leaf_cell()
+        cells.append(cell)
+
+    return cells

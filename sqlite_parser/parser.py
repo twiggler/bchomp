@@ -3,10 +3,10 @@ from functools import wraps
 import struct
 import os
 import dataclasses
+from dataclasses import dataclass, field, replace
 
 T = TypeVar("T")
 R = TypeVar("R")
-Ts = TypeVarTuple("Ts")
 
 class Lazy(Generic[T]):
     """
@@ -75,40 +75,15 @@ class BinaryIOReader:
     def __len__(self) -> int:
         return self._len
 
-
-class SubReader:
-    """
-    A lazy implementation of the Readable protocol for a sub-section of a
-    larger Readable object. It does not copy the data, but rather holds a
-    reference to the original data source and an offset.
-    """
-    def __init__(self, original_reader: Readable, base_offset: int, length: int):
-        self._reader = original_reader
-        self._offset = base_offset
-        self._len = length
-
-    def read(self, n: int, offset: int) -> bytes:
-        """Reads from the original reader, adjusting for the sub-stream's offset."""
-        if offset + n > self._len:
-            n = self._len - offset
-        if n < 0:
-            n = 0
-        
-        # The read happens from the original reader at the base offset + sub-stream offset.
-        return self._reader.read(n, self._offset + offset)
-
-    def __len__(self) -> int:
-        return self._len
-
-
+@dataclass(frozen=True)
 class ParserState:
-    def __init__(self, readable: Readable, pos: int = 0, anchors: list[int] = []):
-        self.readable = readable
-        self.pos = pos
-        self.anchors = anchors
+    readable: Readable
+    pos: int = 0
+    limit: int | None = None
+    anchors: tuple[int, ...] = ()
 
     def __len__(self):
-        return len(self.readable)
+        return len(self.readable) if self.limit is None else min(self.limit, len(self.readable))
 
 
 class Success(Generic[T]):
@@ -139,11 +114,11 @@ def run_parser(parser: Parser[T], data: Readable) -> Result[T]:
 
 
 def any_byte(state: ParserState) -> Result[int]:
-    if state.pos < len(state.readable):
+    if state.pos < len(state):
         read_bytes = state.readable.read(1, state.pos)
         if not read_bytes:
             return Failure("End of stream", state)
-        return Success(read_bytes[0], ParserState(state.readable, state.pos + 1))
+        return Success(read_bytes[0], replace(state, pos=state.pos + 1))
     return Failure("End of stream", state)
 
 
@@ -161,8 +136,8 @@ def seek_absolute(pos: int) -> Parser[None]:
     use the composable `anchor` and `seek` combinators.
     """
     def _seek(state: ParserState) -> Result[None]:
-        if 0 <= pos < len(state.readable):
-            return Success(None, ParserState(state.readable, pos, anchors=state.anchors))
+        if 0 <= pos < len(state):
+            return Success(None, replace(state, pos=pos))
         return Failure(f"Cannot seek to absolute position {pos}", state)
 
     return _seek
@@ -178,8 +153,8 @@ def seek(offset: int) -> Parser[None]:
         base_pos = state.anchors[-1] if state.anchors else 0
         new_pos = base_pos + offset
 
-        if 0 <= new_pos < len(state.readable):
-            return Success(None, ParserState(state.readable, new_pos, anchors=state.anchors))
+        if 0 <= new_pos < len(state):
+            return Success(None, replace(state, pos=new_pos))
         
         msg = f"Cannot seek to offset {offset} from anchor {base_pos}"
         return Failure(msg, state)
@@ -187,7 +162,7 @@ def seek(offset: int) -> Parser[None]:
     return _seek_rel
 
 
-def anchor(p: Parser[T]) -> Parser[T]:
+def with_anchor(p: Parser[T]) -> Parser[T]:
     """
     A combinator that creates a new local frame of reference for seeking.
 
@@ -198,7 +173,7 @@ def anchor(p: Parser[T]) -> Parser[T]:
     """
     def _anchor(state: ParserState) -> Result[T]:
         # 1. Create a new stream with the current position added to the anchor stack.
-        anchored_state = ParserState(state.readable, state.pos, anchors=[*state.anchors, state.pos])
+        anchored_state = replace(state, anchors=state.anchors + (state.pos,))
 
         # 2. Run the wrapped parser in this new anchored context.
         result = p(anchored_state)
@@ -211,50 +186,10 @@ def anchor(p: Parser[T]) -> Parser[T]:
         # 3. On success, calculate bytes consumed inside the anchor and advance
         # the outer stream by that amount, discarding the anchor.
         bytes_consumed = result.state.pos - state.pos
-        final_state = ParserState(state.readable, state.pos + bytes_consumed, anchors=state.anchors)
+        final_state = replace(state, pos=state.pos + bytes_consumed)
         return Success(result.value, final_state)
 
     return _anchor
-
-
-class AnchorContextManager:
-    """
-    A parser-aware context manager for creating temporary anchor points.
-
-    This is designed to be used within a `do`-block. Yielding this object
-    returns a context manager that can be used with a `with` statement.
-    The `__enter__` and `__exit__` methods of the returned manager are themselves
-    parsers that handle the anchor stack.
-    """
-    def __enter__(self) -> Parser[None]:
-        """
-        Returns a parser that, when yielded, pushes the current stream
-        position onto the anchor stack.
-        """
-        def _enter(state: ParserState) -> Result[None]:
-            anchored_state = ParserState(state.readable, state.pos, anchors=[*state.anchors, state.pos])
-            return Success(None, anchored_state)
-        return _enter
-
-    def __exit__(self, exc_type, exc_val, exc_tb) -> Parser[None]:
-        """
-        Returns a parser that, when yielded, pops the most recent anchor
-        from the stack, preserving the stream position.
-        """
-        def _exit(state: ParserState) -> Result[None]:
-            if not state.anchors:
-                return Failure("Cannot exit anchor context: no anchor on the stack.", state)
-            
-            # The stream position is preserved, only the anchor stack is modified.
-            final_state = ParserState(state.readable, state.pos, anchors=state.anchors[:-1])
-            return Success(None, final_state)
-        return _exit
-
-    def __call__(self) -> Parser[Self]:
-        return lambda state: Success(self, state)
-
-anchor_cm = AnchorContextManager()
-
 
 def satisfy(predicate: Callable[[int], bool]) -> Parser[int]:
     def _satisfy(state: ParserState) -> Result[int]:
@@ -276,9 +211,9 @@ def bytes_n(n: int) -> Parser[bytes]:
     def _bytes_n(state: ParserState) -> Result[bytes]:
         start = state.pos
         end = start + n
-        if end > len(state.readable):
+        if end > len(state):
             return Failure("Not enough bytes", state)
-        return Success(state.readable.read(n, start), ParserState(state.readable, end))
+        return Success(state.readable.read(n, start), replace(state, pos=end))
 
     return _bytes_n
 
@@ -296,18 +231,6 @@ def sequence(*parsers: Parser) -> Parser[list]:
         return Success(results, current_state)
 
     return _sequence
-
-
-def choice(*parsers: Parser) -> Parser:
-    def _choice(state: ParserState) -> Result:
-        for p in parsers:
-            result = p(state)
-            if isinstance(result, Success):
-                return result
-        return Failure("All choices failed", state)
-
-    return _choice
-
 
 def many(p: Parser[T]) -> Parser[list[T]]:
     def _many(state: ParserState) -> Result[list[T]]:
@@ -382,58 +305,6 @@ def string(s: str) -> Parser[str]:
         bytes_n(len(s.encode("utf-8")))
     )
 
-def make_lazy(proto: type, lazy_fields: list[str]) -> type:
-    """
-    Dynamically creates a plain class that implements a protocol with some
-    fields being lazy. The constructor accepts public field names.
-    """
-    if not hasattr(proto, "__annotations__"):
-        raise TypeError(f"{proto.__name__} is not a valid protocol for lazy loading.")
-
-    all_fields = list(proto.__annotations__.keys())
-
-    def __init__(self, **kwargs):
-        """
-        Initializes the object, mapping public lazy field names (e.g., 'payload')
-        to their internal storage (e.g., '_payload_lazy').
-        """
-        for key, value in kwargs.items():
-            if key in lazy_fields:
-                # Store the Lazy object in the internal attribute.
-                setattr(self, f"_{key}_lazy", value)
-            else:
-                # Set regular attributes directly.
-                setattr(self, key, value)
-
-    # The `attrs` dictionary will form the body of our new class.
-    attrs: dict[str, Any] = {"__init__": __init__}
-
-    # For each lazy field, create a property that evaluates the lazy value on access.
-    for field in lazy_fields:
-        internal_name = f"_{field}_lazy"
-        
-        # The property uses the `.value` attribute of our `Lazy` class,
-        # which already handles the caching internally.
-        attrs[field] = property(lambda self, name=internal_name: getattr(self, name).value)
-
-    # Add a __repr__ for better debugging output.
-    def __repr__(self):
-        parts = []
-        for name in all_fields:
-            if name in lazy_fields:
-                val = getattr(self, f"_{name}_lazy")
-                parts.append(f"{name}={val!r}")
-            else:
-                val = getattr(self, name)
-                parts.append(f"{name}={val!r}")
-        return f"Lazy{proto.__name__}({', '.join(parts)})"
-
-    attrs["__repr__"] = __repr__
-
-    # Create the new class dynamically using type().
-    new_class_name = f"Lazy{proto.__name__}"
-    return type(new_class_name, (), attrs)
-
 
 def position() -> Parser[int]:
     """
@@ -499,12 +370,11 @@ def take(n: int, p: Parser[T]) -> Parser[T]:
         
         # 2. Create a lazy SubReader for the next `n` bytes. This does not
         #    perform any reading yet.
-        sub_reader = SubReader(current_state.readable, current_state.pos, n)
-        sub_stream = ParserState(sub_reader)
+        scoped_state = replace(current_state, limit = current_state.pos + n)
 
-        # 3. Run the provided parser `p` on the temporary, lazy stream.
+        # 3. Run the provided parser `p` on the temporary scoped state.
         #    The actual reads will happen inside `p`.
-        result = p(sub_stream)
+        result = p(scoped_state)
 
         if isinstance(result, Failure):
             yield failure(f"Parser failed within take({n}): {result.message}")
@@ -512,7 +382,7 @@ def take(n: int, p: Parser[T]) -> Parser[T]:
 
         # 4. If the inner parser succeeds, we must advance the outer stream
         #    by `n` bytes to reflect the bytes that were "taken".
-        yield seek(current_state.pos + n)
+        yield skip(n)
         
         return result.value
 
@@ -540,7 +410,6 @@ def create_parser_from_dataclass(dc: type) -> Parser:
         lambda results: dc(*results),
         sequence(*field_parsers)
     )
-
 
 def do(fn: Callable[..., Generator[Parser, Any, R]]) -> Callable[..., Parser[R]]:
     """
@@ -579,26 +448,61 @@ def lazy(
     parser: Callable[[int], Parser[T]],
 ) -> Generator[Parser, Any, Lazy[T]]:
     """
-    Parses a sequence where a block of data is evaluated lazily.
-  
-    The main stream is advanced past the entire content block, while the lazy thunk
-    gets a separate stream positioned at the start of the content block.
+    Creates a lazy-evaluated value by parsing a block of a given size.
+
+    This combinator is essential for performance. It immediately skips the
+    main stream forward by `size` bytes, while returning a `Lazy` object.
+    The actual parsing of the content block is deferred until the `.value`
+    of the `Lazy` object is accessed for the first time.
+
+    This uses the `take` combinator internally to provide a safe, isolated
+    stream for the deferred parsing.
     """
-    # The size_parser tells us the size of the content that follows it.
-    
-    lazy_content_stream = yield get_state()
-   
-    def lazy_thunk():
-        # When the thunk is called, it creates a new stream at the correct
-        # starting position for the lazy content.
+  
+    # `take` will run `get_stream` on an isolated sub-stream of `size` bytes.
+    # The result, `lazy_content_stream`, will be a Stream object whose data
+    # is only the `size` bytes we skipped over.
+
+    lazy_content_stream = yield take(size, get_state())
+
+    def lazy_thunk() -> T:
+        # When the thunk is finally called, it runs the real parser on the
+        # captured, isolated sub-stream.
         result = parser(size)(lazy_content_stream)
         if isinstance(result, Failure):
-            raise ValueError(f"Failed to parse lazy content: {result}")
+            # If parsing fails, raise an exception to signal the problem.
+            raise ValueError(f"Failed to parse lazy content: {result.message}")
         return result.value
 
-    lazy_value = Lazy(lazy_thunk)
+    # Return a Lazy object containing the thunk. The main stream has already
+    # been advanced by `take`.
+    return Lazy(lazy_thunk)
 
-    # Advance the main stream past the entire content block.
-    yield seek(size)
 
-    return lazy_value
+@do
+def with_bytes_read(parser: Parser[T]) -> Generator[Parser, Any, tuple[T, int]]:
+    """
+    A combinator that returns the result of a parser along with the number of bytes it consumed.
+    """
+    
+    start_pos = yield position()
+    result = yield parser
+    end_pos = yield position()
+    bytes_read = end_pos - start_pos
+    return result, bytes_read
+
+
+def skip(n: int) -> Parser[None]:
+    """
+    A parser that skips n bytes, failing if there are not enough bytes.
+    """
+
+    def _parser(state: ParserState) -> Result[None]:
+        if n < 0 or n > len(state):
+            return Failure(message="Not enough bytes to skip", state = state)
+
+        new_pos = state.pos + n
+        return Success(value=None, state=replace(state, pos=new_pos))
+
+    return _parser
+
