@@ -12,7 +12,7 @@ This parser is designed to read a SQLite database file (like the included `chino
 - **Lazy Evaluation:** The parser uses a `lazy` combinator to defer the parsing of expensive table record payloads. The payload is only parsed from the byte stream when its value is explicitly requested, making initial loading very fast.
 - **Declarative Grammar (`database.py`):** The SQLite file format grammar is defined declaratively using the combinator library. This makes the code highly readable and closely mirrors the official SQLite documentation.
 - **B-Tree Traversal:** The parser can walk the database's B-Tree structure, starting from the root page, to locate the first leaf page where table data is stored.
-- **Composable Parsing with Anchors:** To solve the problem of absolute seeks breaking parser composability, the library uses an "anchor" system. An `anchor` establishes a new local frame of reference, allowing all subsequent seeks to be relative. This makes parsers modular, reusable, and easier to reason about.
+- **Composable, Relocatable Parsers:** To solve the problem of absolute seeks breaking parser composability, the library uses a relocation system. The `with_relocation` combinator establishes a new local frame of reference, allowing all subsequent `seek` calls to be relative to that point. Alternatively, parsers can be decorated with `@relocatable`, which does the same.
 
 ## Analysis
 

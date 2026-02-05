@@ -162,16 +162,16 @@ def seek(offset: int) -> Parser[None]:
     return _seek_rel
 
 
-def with_anchor(p: Parser[T]) -> Parser[T]:
+def with_relocation(p: Parser[T]) -> Parser[T]:
     """
     A combinator that creates a new local frame of reference for seeking.
 
-    It runs a parser `p` within an "anchored" context. Any `seek` calls
+    It runs a parser `p` within an "relocated" context. Any `seek` calls
     inside `p` will be relative to the stream position where the anchor
     was created. This allows for composable, relocatable parsers that can
     perform seeks without breaking backtracking.
     """
-    def _anchor(state: ParserState) -> Result[T]:
+    def _relocatable(state: ParserState) -> Result[T]:
         # 1. Create a new stream with the current position added to the anchor stack.
         anchored_state = replace(state, anchors=state.anchors + (state.pos,))
 
@@ -189,7 +189,21 @@ def with_anchor(p: Parser[T]) -> Parser[T]:
         final_state = replace(state, pos=state.pos + bytes_consumed)
         return Success(result.value, final_state)
 
-    return _anchor
+    return _relocatable
+
+
+def relocatable(parser_producer: Callable[..., Parser[T]]) -> Callable[..., Parser[T]]:
+    """
+    A decorator that makes a parser-producing function create a relocatable parser.
+    This automatically wraps the returned parser in `with_relocation`.
+    """
+
+    @wraps(parser_producer)
+    def wrapper(*args: Any, **kwargs: Any) -> Parser[T]:
+        parser = parser_producer(*args, **kwargs)
+        return with_relocation(parser)
+
+    return wrapper
 
 def satisfy(predicate: Callable[[int], bool]) -> Parser[int]:
     def _satisfy(state: ParserState) -> Result[int]:

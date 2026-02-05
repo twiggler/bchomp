@@ -175,12 +175,12 @@ def traverse_and_parse_leaf_pages(page_num: int, page_size: int) -> p.Parser[Ite
 
         if page_type == PageType.TABLE_LEAF:
             # This is a table leaf page, parse it and return.
-            leaf_page = yield p.with_anchor(parse_leaf_page(offset, page_size))
+            leaf_page = yield parse_leaf_page(offset, page_size)
             return [leaf_page]
 
         elif page_type == PageType.TABLE_INTERIOR:
             # This is a table interior page. Get the child pointers to recurse.
-            child_page_pointers = yield p.with_anchor(parse_interior_page_child_pointers(offset))
+            child_page_pointers = yield parse_interior_page_child_pointers(offset)
             found_pages = []
             for child_page_num in child_page_pointers:
                 child_results = yield _traverse(child_page_num)
@@ -198,11 +198,11 @@ def traverse_and_parse_leaf_pages(page_num: int, page_size: int) -> p.Parser[Ite
     return _traverse(page_num)
 
 
+@p.relocatable
 @p.do
 def parse_interior_page_child_pointers(offset : int) -> Generator[p.Parser, Any, list[int]]:
     """
     Parses an interior page to extract all child page pointers.
-    This must be run inside a page-level anchor.
     """
     header = yield b_tree_interior_page_header
     
@@ -226,37 +226,33 @@ class LeafPage:
     cells: p.Lazy[list[TableLeafCell]]
 
 
+@p.relocatable
 @p.do
 def parse_leaf_page(offset: int, page_size: int) -> Generator[p.Parser, Any, LeafPage]:
     """
     Parses a leaf page, returning a `LeafPage` object with a lazily-evaluated
-    list of cells.
+    list of cells. This is a relocatable parser.
     """
-    
+
+    @p.do
+    def parse_leaf_page_cells(
+        cell_count: int,
+    ) -> Generator[p.Parser, Any, list[TableLeafCell]]:
+        cell_pointers = yield cell_pointer_array(cell_count)
+
+        cells = []
+        for cell_ptr_offset in cell_pointers:
+            yield p.seek(cell_ptr_offset - offset)
+            cell = yield table_leaf_cell()
+            cells.append(cell)
+
+        return cells
+
     header, header_size = yield p.with_bytes_read(b_tree_leaf_page_header)
 
     lazy_cells = yield p.lazy(
         page_size - header_size,
-        lambda _: parse_leaf_page_cells(header.cell_count, offset),
+        lambda _: parse_leaf_page_cells(header.cell_count),
     )
 
     return LeafPage(header=header, cells=lazy_cells)
-
-
-@p.do
-def parse_leaf_page_cells(
-    cell_count: int, offset: int
-) -> Generator[p.Parser, Any, list[TableLeafCell]]:
-    """
-    Parses all cells in a leaf page.
-    This must be run inside a page-level anchor, positioned after the header.
-    """
-    cell_pointers = yield cell_pointer_array(cell_count)
-
-    cells = []
-    for cell_ptr_offset in cell_pointers:
-        yield p.seek(cell_ptr_offset - offset)
-        cell = yield table_leaf_cell()
-        cells.append(cell)
-
-    return cells
