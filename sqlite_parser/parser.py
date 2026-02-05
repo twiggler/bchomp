@@ -270,25 +270,22 @@ def map_p(fn: Callable[[T], R], p: Parser[T]) -> Parser[R]:
     return _map_p
 
 
-def uint16_be(state: ParserState) -> Result[int]:
-    result = bytes_n(2)(state)
-    if isinstance(result, Failure):
-        return result
-    value = struct.unpack(">H", result.value)[0]
-    return Success(value, result.state)
+def uint_be(n: int) -> Parser[int]:
+    """
+    A generic parser for big-endian unsigned integers of `n` bytes.
+    """
+    def _uint_be(state: ParserState) -> Result[int]:
+        result = bytes_n(n)(state)
+        if isinstance(result, Failure):
+            return result
+        value = int.from_bytes(result.value, 'big', signed=False)
+        return Success(value, result.state)
+    return _uint_be
 
-def uint32_be(state: ParserState) -> Result[int]:
-    result = bytes_n(4)(state)
-    if isinstance(result, Failure):
-        return result
-    value = struct.unpack(">I", result.value)[0]
-    return Success(value, result.state)
 
-def uint8(state: ParserState) -> Result[int]:
-    result = bytes_n(1)(state)
-    if isinstance(result, Failure):
-        return result
-    return Success(result.value[0], result.state)
+uint8 = uint_be(1)
+uint16_be = uint_be(2)
+uint32_be = uint_be(4)
 
 def count(n: int, p: Parser[T]) -> Parser[list[T]]:
     """Runs a parser `p` exactly `n` times."""

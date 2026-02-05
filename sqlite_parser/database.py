@@ -13,25 +13,21 @@ class PageType(IntEnum):
 
 
 @dataclass
-class BTreeInteriorPageHeader:
+class BTreePageHeaderBase:
     page_type: Annotated[int, p.uint8]
     freeblock_start: Annotated[int, p.uint16_be]
     cell_count: Annotated[int, p.uint16_be]
     cell_start: Annotated[int, p.uint16_be]
     fragmented_bytes: Annotated[int, p.uint8]
-    right_most_pointer: Annotated[int, p.uint32_be]
 
 
 @dataclass
-class BTreeLeafPageHeader:
-    page_type: Annotated[int, p.uint8]
-    freeblock_start: Annotated[int, p.uint16_be]
-    cell_count: Annotated[int, p.uint16_be]
-    cell_start: Annotated[int, p.uint16_be]
-    fragmented_bytes: Annotated[int, p.uint8]
+class BTreeInteriorPageHeader(BTreePageHeaderBase):
+    right_most_pointer: Annotated[int, p.uint32_be]
 
 
-BTreePageHeader = Union[BTreeInteriorPageHeader, BTreeLeafPageHeader]
+BTreeLeafPageHeader = BTreePageHeaderBase
+
 
 b_tree_interior_page_header: p.Parser[BTreeInteriorPageHeader] = p.create_parser_from_dataclass(BTreeInteriorPageHeader)
 b_tree_leaf_page_header: p.Parser[BTreeLeafPageHeader] = p.create_parser_from_dataclass(BTreeLeafPageHeader)
@@ -158,7 +154,7 @@ def parse_record_body(serial_types: list[int]) -> p.Parser[list[ColumnValue]]:
 
     return p.sequence(*parsers)
 
-def traverse_and_parse_leaf_pages(page_num: int, page_size: int) -> p.Parser[Iterable[LeafPage]]:
+def parse_table_leaf_pages(page_num: int, page_size: int) -> p.Parser[Iterable[LeafPage]]:
     """
     A recursive parser that traverses a B-Tree and returns a list of
     all parsed TABLE_LEAF pages, ignoring index pages.
@@ -192,9 +188,7 @@ def traverse_and_parse_leaf_pages(page_num: int, page_size: int) -> p.Parser[Ite
             # Stop traversing this branch by returning an empty list.
             return []
 
-        # We can now safely recurse for the children we found.
        
-
     return _traverse(page_num)
 
 

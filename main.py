@@ -2,7 +2,7 @@ from typing import Any, Generator, Iterable
 import sqlite_parser.parser as p
 from sqlite_parser.database import (
     LeafPage,
-    traverse_and_parse_leaf_pages,
+    parse_table_leaf_pages,
 )
 
 
@@ -22,7 +22,7 @@ def parse_schema_table() -> Generator[p.Parser, Any, Iterable[LeafPage]]:
     # The schema is on page 1, so we start there.
     yield p.seek_absolute(0)
     
-    leaf_pages = yield traverse_and_parse_leaf_pages(page_num=1, page_size=page_size)
+    leaf_pages = yield parse_table_leaf_pages(page_num=1, page_size=page_size)
     return leaf_pages
 
 
