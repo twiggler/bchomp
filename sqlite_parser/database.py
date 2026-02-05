@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from sqlite_parser import parser as p
 from functools import reduce
-from typing import Any, Callable, Annotated, Generator, Union, Iterator
+from typing import Any, Callable, Annotated, Generator, Iterable, Union, Iterator
 from enum import IntEnum
 
 
@@ -158,14 +158,14 @@ def parse_record_body(serial_types: list[int]) -> p.Parser[list[ColumnValue]]:
 
     return p.sequence(*parsers)
 
-def traverse_and_parse_leaf_pages(page_num: int, page_size: int) -> p.Parser[list[LeafPage]]:
+def traverse_and_parse_leaf_pages(page_num: int, page_size: int) -> p.Parser[Iterable[LeafPage]]:
     """
     A recursive parser that traverses a B-Tree and returns a list of
     all parsed TABLE_LEAF pages, ignoring index pages.
     """
     
     @p.do
-    def _traverse(current_page_num: int) -> Generator[p.Parser, Any, list[LeafPage]]:
+    def _traverse(current_page_num: int) -> Generator[p.Parser, Any, Iterable[LeafPage]]:
         page_start = (current_page_num - 1) * page_size
         offset = 100 if current_page_num == 1 else 0
         yield p.seek(page_start + offset)
