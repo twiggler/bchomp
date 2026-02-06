@@ -75,15 +75,39 @@ class BinaryIOReader:
     def __len__(self) -> int:
         return self._len
 
+class SubReader:
+    """
+    A Readable that presents a limited view (a slice) of another Readable.
+    """
+    def __init__(self, base_reader: Readable, base_offset: int, length: int):
+        self._base_reader = base_reader
+        self._base_offset = base_offset
+        self._len = length
+        self._end_offset = base_offset + length
+
+    def read(self, n: int, offset: int) -> bytes:
+        if offset < self._base_offset or offset >= self._end_offset:
+            return b'' # Reading outside our slice returns nothing.
+
+        # Clamp the number of bytes to not read past our end.
+        n = min(n, self._end_offset - offset)
+        
+        # The read is forwarded to the base reader with the absolute offset.
+        return self._base_reader.read(n, offset)
+
+    def __len__(self) -> int:
+        # The length of a subreader is the length of its slice.
+        return self._len
+
+
 @dataclass(frozen=True)
 class ParserState:
     readable: Readable
     pos: int = 0
-    limit: int | None = None
     anchors: tuple[int, ...] = ()
 
     def __len__(self):
-        return len(self.readable) if self.limit is None else min(self.limit, len(self.readable))
+        return len(self.readable)
 
 
 class Success(Generic[T]):
@@ -113,13 +137,29 @@ def run_parser(parser: Parser[T], data: Readable) -> Result[T]:
     return parser(state)
 
 
-def any_byte(state: ParserState) -> Result[int]:
-    if state.pos < len(state):
-        read_bytes = state.readable.read(1, state.pos)
-        if not read_bytes:
-            return Failure("End of stream", state)
-        return Success(read_bytes[0], replace(state, pos=state.pos + 1))
-    return Failure("End of stream", state)
+def bytes_n(n: int) -> Parser[bytes]:
+    def _bytes_n(state: ParserState) -> Result[bytes]:
+        read_bytes = state.readable.read(n, state.pos)
+        if len(read_bytes) < n:
+            return Failure(
+                f"End of stream: expected {n} bytes, but only got {len(read_bytes)}",
+                state,
+            )
+        return Success(read_bytes, replace(state, pos=state.pos + n))
+
+    return _bytes_n
+
+
+def map_p(fn: Callable[[T], R], p: Parser[T]) -> Parser[R]:
+    def _map_p(state: ParserState) -> Result[R]:
+        result = p(state)
+        if isinstance(result, Failure):
+            return result
+        return Success(fn(result.value), result.state)
+    return _map_p
+
+
+any_byte = map_p(lambda b: b[0], bytes_n(1))
 
 
 def seek_absolute(pos: int) -> Parser[None]:
@@ -148,16 +188,12 @@ def seek(offset: int) -> Parser[None]:
     Moves the stream to a position relative to the current anchor.
     If no anchor is set, seeks relative to the start of the stream.
     This operation is safe, composable, and allows for backtracking.
+    The check for validity is deferred to the next read operation.
     """
     def _seek_rel(state: ParserState) -> Result[None]:
         base_pos = state.anchors[-1] if state.anchors else 0
         new_pos = base_pos + offset
-
-        if 0 <= new_pos < len(state):
-            return Success(None, replace(state, pos=new_pos))
-        
-        msg = f"Cannot seek to offset {offset} from anchor {base_pos}"
-        return Failure(msg, state)
+        return Success(None, replace(state, pos=new_pos))
 
     return _seek_rel
 
@@ -220,18 +256,6 @@ def satisfy(predicate: Callable[[int], bool]) -> Parser[int]:
 def byte(b: int) -> Parser[int]:
     return satisfy(lambda x: x == b)
 
-
-def bytes_n(n: int) -> Parser[bytes]:
-    def _bytes_n(state: ParserState) -> Result[bytes]:
-        start = state.pos
-        end = start + n
-        if end > len(state):
-            return Failure("Not enough bytes", state)
-        return Success(state.readable.read(n, start), replace(state, pos=end))
-
-    return _bytes_n
-
-
 def sequence(*parsers: Parser) -> Parser[list]:
     def _sequence(state: ParserState) -> Result[list]:
         results = []
@@ -259,16 +283,6 @@ def many(p: Parser[T]) -> Parser[list[T]]:
         return Success(results, current_state)
 
     return _many
-
-
-def map_p(fn: Callable[[T], R], p: Parser[T]) -> Parser[R]:
-    def _map_p(state: ParserState) -> Result[R]:
-        result = p(state)
-        if isinstance(result, Failure):
-            return result
-        return Success(fn(result.value), result.state)
-    return _map_p
-
 
 def uint_be(n: int) -> Parser[int]:
     """
@@ -379,20 +393,25 @@ def take(n: int, p: Parser[T]) -> Parser[T]:
         # 1. Get the current stream to calculate the sub-reader's offset and data source.
         current_state = yield get_state()
         
-        # 2. Create a lazy SubReader for the next `n` bytes. This does not
-        #    perform any reading yet.
-        scoped_state = replace(current_state, limit = current_state.pos + n)
+        # 2. Create a SubReader for the next `n` bytes.
+        sub_reader = SubReader(
+            base_reader=current_state.readable,
+            base_offset=current_state.pos,
+            length=n
+        )
+        # The new state uses the SubReader, but `pos` is still absolute.
+        scoped_state = replace(current_state, readable=sub_reader)
 
-        # 3. Run the provided parser `p` on the temporary scoped state.
-        #    The actual reads will happen inside `p`.
+        # 3. Run the provided parser `p` on the scoped state.
+        #    The SubReader will enforce the boundary.
         result = p(scoped_state)
 
         if isinstance(result, Failure):
             yield failure(f"Parser failed within take({n}): {result.message}")
             return  # type: ignore
 
-        # 4. If the inner parser succeeds, we must advance the outer stream
-        #    by `n` bytes to reflect the bytes that were "taken".
+        # 4. If the inner parser succeeds, we advance the outer stream's
+        #    position by `n` bytes.
         yield skip(n)
         
         return result.value
