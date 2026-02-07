@@ -21,7 +21,7 @@ def parse_schema_table() -> Generator[p.Parser, Any, Iterable[LeafPage]]:
 
     # The schema is on page 1, so we start there.
     yield p.seek_absolute(0)
-    
+
     leaf_pages = yield parse_table_leaf_pages(page_num=1, page_size=page_size)
     return leaf_pages
 
@@ -30,18 +30,20 @@ def print_schema_results(leaf_pages: Iterable[LeafPage]) -> None:
     """Iterates through parsed leaf pages and prints their contents."""
     for leaf_page in leaf_pages:
         print(f"Found leaf page with header: {leaf_page.header}")
-        
+
         # The cells are lazy, so accessing them will trigger parsing.
         for cell in leaf_page.cells.value:
             # The payload of the cell is a Record object.
             # For the sqlite_schema table, the columns are:
             # type, name, tbl_name, rootpage, sql
             record = cell.payload
-            
+
             # We can now inspect the values
             if record.values:
                 schema_type, name, tbl_name, rootpage, sql = record.values
-                print(f"    - Schema Object: type={schema_type}, name={name}, tbl_name={tbl_name}, rootpage={rootpage}")
+                print(
+                    f"    - Schema Object: type={schema_type}, name={name}, tbl_name={tbl_name}, rootpage={rootpage}"
+                )
                 print(f"      SQL: {sql}")
 
 
@@ -54,6 +56,7 @@ def main():
         else:
             # Pass the successful result to the printing function
             print_schema_results(result.value)
+
 
 if __name__ == "__main__":
     main()

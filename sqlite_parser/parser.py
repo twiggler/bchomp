@@ -1,4 +1,18 @@
-from typing import Any, Callable, Generator, Generic, Self, TypeVar, TypeVarTuple, Union, Optional, Protocol, IO, get_args, TYPE_CHECKING
+from typing import (
+    Any,
+    Callable,
+    Generator,
+    Generic,
+    Self,
+    TypeVar,
+    TypeVarTuple,
+    Union,
+    Optional,
+    Protocol,
+    IO,
+    get_args,
+    TYPE_CHECKING,
+)
 from functools import wraps
 import struct
 import os
@@ -8,11 +22,13 @@ from dataclasses import dataclass, field, replace
 T = TypeVar("T")
 R = TypeVar("R")
 
+
 class Lazy(Generic[T]):
     """
     A wrapper for a value that is computed lazily.
     The thunk is a function that takes no arguments and returns the value.
     """
+
     def __init__(self, thunk: Callable[[], T]):
         self._thunk = thunk
         self._value: Optional[T] = None
@@ -34,21 +50,21 @@ class Readable(Protocol):
     A protocol for a readable data source that allows random access.
     This decouples the parsers from a specific data backend like bytes or mmap.
     """
-    def read(self, n: int, offset: int) -> bytes:
-        ...
 
-    def __len__(self) -> int:
-        ...
+    def read(self, n: int, offset: int) -> bytes: ...
+
+    def __len__(self) -> int: ...
 
 
 class BytesReader:
     """An implementation of the Readable protocol for an in-memory bytes object."""
+
     def __init__(self, data: bytes):
         self._data = data
         self._len = len(data)
 
     def read(self, n: int, offset: int) -> bytes:
-        return self._data[offset:offset + n]
+        return self._data[offset : offset + n]
 
     def __len__(self) -> int:
         return self._len
@@ -59,6 +75,7 @@ class BinaryIOReader:
     An implementation of the Readable protocol for a file-like object
     opened in binary mode (IO[bytes]).
     """
+
     def __init__(self, f: IO[bytes]):
         self._f = f
         # Get the total size by seeking to the end and back.
@@ -75,10 +92,12 @@ class BinaryIOReader:
     def __len__(self) -> int:
         return self._len
 
+
 class SubReader:
     """
     A Readable that presents a limited view (a slice) of another Readable.
     """
+
     def __init__(self, base_reader: Readable, base_offset: int, length: int):
         self._base_reader = base_reader
         self._base_offset = base_offset
@@ -87,11 +106,11 @@ class SubReader:
 
     def read(self, n: int, offset: int) -> bytes:
         if offset < self._base_offset or offset >= self._end_offset:
-            return b'' # Reading outside our slice returns nothing.
+            return b""  # Reading outside our slice returns nothing.
 
         # Clamp the number of bytes to not read past our end.
         n = min(n, self._end_offset - offset)
-        
+
         # The read is forwarded to the base reader with the absolute offset.
         return self._base_reader.read(n, offset)
 
@@ -156,6 +175,7 @@ def map_p(fn: Callable[[T], R], p: Parser[T]) -> Parser[R]:
         if isinstance(result, Failure):
             return result
         return Success(fn(result.value), result.state)
+
     return _map_p
 
 
@@ -175,6 +195,7 @@ def seek_absolute(pos: int) -> Parser[None]:
     to an initial offset from the start of a file. For all other purposes,
     use the composable `anchor` and `seek` combinators.
     """
+
     def _seek(state: ParserState) -> Result[None]:
         if 0 <= pos < len(state):
             return Success(None, replace(state, pos=pos))
@@ -190,6 +211,7 @@ def seek(offset: int) -> Parser[None]:
     This operation is safe, composable, and allows for backtracking.
     The check for validity is deferred to the next read operation.
     """
+
     def _seek_rel(state: ParserState) -> Result[None]:
         base_pos = state.anchors[-1] if state.anchors else 0
         new_pos = base_pos + offset
@@ -207,6 +229,7 @@ def with_relocation(p: Parser[T]) -> Parser[T]:
     was created. This allows for composable, relocatable parsers that can
     perform seeks without breaking backtracking.
     """
+
     def _relocatable(state: ParserState) -> Result[T]:
         # 1. Create a new stream with the current position added to the anchor stack.
         anchored_state = replace(state, anchors=state.anchors + (state.pos,))
@@ -241,6 +264,7 @@ def relocatable(parser_producer: Callable[..., Parser[T]]) -> Callable[..., Pars
 
     return wrapper
 
+
 def satisfy(predicate: Callable[[int], bool]) -> Parser[int]:
     def _satisfy(state: ParserState) -> Result[int]:
         result = any_byte(state)
@@ -256,6 +280,7 @@ def satisfy(predicate: Callable[[int], bool]) -> Parser[int]:
 def byte(b: int) -> Parser[int]:
     return satisfy(lambda x: x == b)
 
+
 def sequence(*parsers: Parser) -> Parser[list]:
     def _sequence(state: ParserState) -> Result[list]:
         results = []
@@ -269,6 +294,7 @@ def sequence(*parsers: Parser) -> Parser[list]:
         return Success(results, current_state)
 
     return _sequence
+
 
 def many(p: Parser[T]) -> Parser[list[T]]:
     def _many(state: ParserState) -> Result[list[T]]:
@@ -284,22 +310,26 @@ def many(p: Parser[T]) -> Parser[list[T]]:
 
     return _many
 
+
 def uint_be(n: int) -> Parser[int]:
     """
     A generic parser for big-endian unsigned integers of `n` bytes.
     """
+
     def _uint_be(state: ParserState) -> Result[int]:
         result = bytes_n(n)(state)
         if isinstance(result, Failure):
             return result
-        value = int.from_bytes(result.value, 'big', signed=False)
+        value = int.from_bytes(result.value, "big", signed=False)
         return Success(value, result.state)
+
     return _uint_be
 
 
 uint8 = uint_be(1)
 uint16_be = uint_be(2)
 uint32_be = uint_be(4)
+
 
 def count(n: int, p: Parser[T]) -> Parser[list[T]]:
     """Runs a parser `p` exactly `n` times."""
@@ -323,12 +353,10 @@ def bind_p(p: Parser[T], f: Callable[[T], Parser[R]]) -> Parser[R]:
 
     return _bind_p
 
+
 def string(s: str) -> Parser[str]:
     """Parses a specific string."""
-    return map_p(
-        lambda x: x.decode("utf-8"),
-        bytes_n(len(s.encode("utf-8")))
-    )
+    return map_p(lambda x: x.decode("utf-8"), bytes_n(len(s.encode("utf-8"))))
 
 
 def position() -> Parser[int]:
@@ -337,8 +365,10 @@ def position() -> Parser[int]:
     in the stream. This is useful for calculations that depend on the
     size of a parsed block.
     """
+
     def _position(state: ParserState) -> Result[int]:
         return Success(state.pos, state)
+
     return _position
 
 
@@ -347,8 +377,10 @@ def get_state() -> Parser[ParserState]:
     A parser that consumes no input and returns the current stream object.
     This is useful within a `do` block to get access to the stream.
     """
+
     def _get_stream(state: ParserState) -> Result[ParserState]:
         return Success(state, state)
+
     return _get_stream
 
 
@@ -358,8 +390,10 @@ def failure(message: str) -> Parser[Any]:
     This is useful for reporting custom error messages within a `do` block
     or other complex parsers.
     """
+
     def _failure(state: ParserState) -> Failure:
         return Failure(message, state)
+
     return _failure
 
 
@@ -370,12 +404,14 @@ def peek(p: Parser[T]) -> Parser[T]:
     where it was before `p` was run. This is useful for looking ahead
     in the stream to decide which parser to use next.
     """
+
     def _peek(state: ParserState) -> Result[T]:
         result = p(state)
         if isinstance(result, Failure):
             return result
         # On success, return the value but with the original, unmodified stream.
         return Success(result.value, state)
+
     return _peek
 
 
@@ -388,16 +424,15 @@ def take(n: int, p: Parser[T]) -> Parser[T]:
     anchored, then reads `n` bytes, and runs `p` on that isolated block.
     This demonstrates how more complex combinators can be built from simpler ones.
     """
+
     @do
     def _take_impl() -> Generator[Parser, Any, T]:
         # 1. Get the current stream to calculate the sub-reader's offset and data source.
         current_state = yield get_state()
-        
+
         # 2. Create a SubReader for the next `n` bytes.
         sub_reader = SubReader(
-            base_reader=current_state.readable,
-            base_offset=current_state.pos,
-            length=n
+            base_reader=current_state.readable, base_offset=current_state.pos, length=n
         )
         # The new state uses the SubReader, but `pos` is still absolute.
         scoped_state = replace(current_state, readable=sub_reader)
@@ -413,7 +448,7 @@ def take(n: int, p: Parser[T]) -> Parser[T]:
         # 4. If the inner parser succeeds, we advance the outer stream's
         #    position by `n` bytes.
         yield skip(n)
-        
+
         return result.value
 
     return _take_impl()
@@ -436,10 +471,8 @@ def create_parser_from_dataclass(dc: type) -> Parser:
             # The parser is the second argument in our Annotated type
             field_parsers.append(args[1])
 
-    return map_p(
-        lambda results: dc(*results),
-        sequence(*field_parsers)
-    )
+    return map_p(lambda results: dc(*results), sequence(*field_parsers))
+
 
 def do(fn: Callable[..., Generator[Parser, Any, R]]) -> Callable[..., Parser[R]]:
     """
@@ -452,12 +485,15 @@ def do(fn: Callable[..., Generator[Parser, Any, R]]) -> Callable[..., Parser[R]]
     generator's final return value becomes the success value of the
     overall parser.
     """
+
     @wraps(fn)
     def wrapper(*args, **kwargs) -> Parser[R]:
         def _do(state: ParserState) -> Result[R]:
             gen = fn(*args, **kwargs)
-            
-            def step(g: Generator[Parser[Any], Any, R], state: ParserState, value: Any = None) -> Result[R]:
+
+            def step(
+                g: Generator[Parser[Any], Any, R], state: ParserState, value: Any = None
+            ) -> Result[R]:
                 try:
                     p = g.send(value)
                     result = p(state)
@@ -469,8 +505,11 @@ def do(fn: Callable[..., Generator[Parser, Any, R]]) -> Callable[..., Parser[R]]
                     return Success(e.value, state)
 
             return step(gen, state)
+
         return _do
+
     return wrapper
+
 
 @do
 def lazy(
@@ -488,7 +527,7 @@ def lazy(
     This uses the `take` combinator internally to provide a safe, isolated
     stream for the deferred parsing.
     """
-  
+
     # `take` will run `get_stream` on an isolated sub-stream of `size` bytes.
     # The result, `lazy_content_stream`, will be a Stream object whose data
     # is only the `size` bytes we skipped over.
@@ -514,7 +553,7 @@ def with_bytes_read(parser: Parser[T]) -> Generator[Parser, Any, tuple[T, int]]:
     """
     A combinator that returns the result of a parser along with the number of bytes it consumed.
     """
-    
+
     start_pos = yield position()
     result = yield parser
     end_pos = yield position()
@@ -529,10 +568,9 @@ def skip(n: int) -> Parser[None]:
 
     def _parser(state: ParserState) -> Result[None]:
         if n < 0 or n > len(state):
-            return Failure(message="Not enough bytes to skip", state = state)
+            return Failure(message="Not enough bytes to skip", state=state)
 
         new_pos = state.pos + n
         return Success(value=None, state=replace(state, pos=new_pos))
 
     return _parser
-
