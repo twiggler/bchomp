@@ -1,11 +1,32 @@
+"""Parsers for the SQLite database file format structures."""
+
 from dataclasses import dataclass
-from sqlite_parser import parser as p
-from functools import reduce
-from typing import Any, Callable, Annotated, Generator, Iterable, Union, Iterator
 from enum import IntEnum
+from functools import reduce
+from typing import TYPE_CHECKING, Annotated, Any
+
+from sqlite_parser import parser as p
+
+if TYPE_CHECKING:
+    from collections.abc import Generator, Iterable
+
+# Constants for serial types
+SERIAL_TYPE_NULL = 0
+SERIAL_TYPE_INT8 = 1
+SERIAL_TYPE_INT16 = 2
+SERIAL_TYPE_INT24 = 3
+SERIAL_TYPE_INT32 = 4
+SERIAL_TYPE_INT48 = 5
+SERIAL_TYPE_FLOAT64 = 7
+SERIAL_TYPE_ZERO = 8
+SERIAL_TYPE_ONE = 9
+SERIAL_TYPE_BLOB_MIN = 13
+SERIAL_TYPE_TEXT_MIN = 12
 
 
 class PageType(IntEnum):
+    """An enumeration of B-Tree page types."""
+
     INDEX_INTERIOR = 2
     TABLE_INTERIOR = 5
     INDEX_LEAF = 10
@@ -14,6 +35,14 @@ class PageType(IntEnum):
 
 @dataclass
 class BTreePageHeaderBase:
+    """The base header for a B-Tree page, common to all page types.
+
+    This structure contains metadata about the page, such as its type, the
+    number of cells it contains, and information about free space. The first
+    100 bytes of the database file are the database header, but for all other
+    pages, the B-Tree page header is at the beginning of the page.
+    """
+
     page_type: Annotated[int, p.uint8]
     freeblock_start: Annotated[int, p.uint16_be]
     cell_count: Annotated[int, p.uint16_be]
@@ -23,6 +52,12 @@ class BTreePageHeaderBase:
 
 @dataclass
 class BTreeInteriorPageHeader(BTreePageHeaderBase):
+    """The header for a B-Tree interior page, extending the base header.
+
+    Interior pages (both for tables and indexes) contain a `right_most_pointer`
+    which points to a child page.
+    """
+
     right_most_pointer: Annotated[int, p.uint32_be]
 
 
@@ -30,19 +65,22 @@ BTreeLeafPageHeader = BTreePageHeaderBase
 
 
 b_tree_interior_page_header: p.Parser[BTreeInteriorPageHeader] = p.create_parser_from_dataclass(
-    BTreeInteriorPageHeader
+    BTreeInteriorPageHeader,
 )
 b_tree_leaf_page_header: p.Parser[BTreeLeafPageHeader] = p.create_parser_from_dataclass(
-    BTreeLeafPageHeader
+    BTreeLeafPageHeader,
 )
 
 
 def cell_pointer_array(cell_count: int) -> p.Parser[list[int]]:
+    """Parse an array of cell pointers."""
     return p.count(cell_count, p.uint16_be)
 
 
 def varint(state: p.ParserState) -> p.Result[int]:
-    def process_bytes(parts):
+    """Parse a variable-length integer (varint)."""
+
+    def process_bytes(parts: tuple[list[int], int]) -> int:
         head, tail = parts
         initial_value = reduce(lambda acc, byte: (acc << 7) | (byte & 0x7F), head, 0)
         return (initial_value << 7) | (tail & 0x7F)
@@ -57,20 +95,27 @@ def varint(state: p.ParserState) -> p.Result[int]:
 
 @dataclass
 class Record:
+    """Represents a data record from a table, corresponding to a single row.
+
+    In SQLite, the payload of a table B-tree leaf cell is a record. This
+    class holds the parsed content of such a record, which includes a list of
+    serial types that describe the data, and the actual column values.
+    """
+
     serial_types: list[int]
-    values: list["ColumnValue"]
+    values: list[ColumnValue]
 
 
 @p.do
 def record_header() -> Generator[p.Parser, Any, tuple[int, list[int]]]:
-    """
-    Parses the record header using do-notation for clarity.
+    """Parse the record header using do-notation for clarity.
 
-    Returns a tuple containing:
-    - The total size of the header in bytes (including the size varint).
-    - A list of the serial types.
-    """
+    Returns:
+        A tuple containing:
+        - The total size of the header in bytes (including the size varint).
+        - A list of the serial types.
 
+    """
     total_header_size, varint_size = yield p.with_bytes_read(varint)
 
     header_content_size = total_header_size - varint_size
@@ -82,6 +127,7 @@ def record_header() -> Generator[p.Parser, Any, tuple[int, list[int]]]:
 
 @p.do
 def record(payload_size: int) -> Generator[p.Parser, Any, Record]:
+    """Parse a record of a given size."""
     header_size, header_content = yield record_header()
 
     body_size = payload_size - header_size
@@ -94,11 +140,12 @@ def record(payload_size: int) -> Generator[p.Parser, Any, Record]:
 
 @p.do
 def table_interior_cell() -> Generator[p.Parser, Any, int]:
-    """
-    Parses a table interior cell to find the left-child pointer.
+    """Parse a table interior cell to find the left-child pointer.
+
     An interior cell format is:
     - 4-byte page number (the left child pointer)
     - A varint for the integer key.
+
     We only need the page number for our traversal.
     """
     page_number = yield p.uint32_be
@@ -108,12 +155,15 @@ def table_interior_cell() -> Generator[p.Parser, Any, int]:
 
 @dataclass
 class TableLeafCell:
+    """A cell in a table leaf page."""
+
     rowid: int
     payload: Record
 
 
 @p.do
 def table_leaf_cell() -> Generator[p.Parser, Any, TableLeafCell]:
+    """Parse a table leaf cell."""
     payload_size = yield varint
     row_id = yield varint
 
@@ -124,35 +174,48 @@ def table_leaf_cell() -> Generator[p.Parser, Any, TableLeafCell]:
     return TableLeafCell(rowid=row_id, payload=payload)
 
 
-ColumnValue = Union[int, None, bytes, str]
+ColumnValue = int | None | bytes | str
 
 # Mappings from serial type to a parser for that type.
 # https://www.sqlite.org/fileformat.html#record_format
 serial_type_parsers: dict[int, p.Parser[ColumnValue]] = {
-    0: p.map_p(lambda _: None, p.bytes_n(0)),  # NULL
-    1: p.map_p(lambda b: int.from_bytes(b, "big", signed=True), p.bytes_n(1)),  # 8-bit integer
-    2: p.map_p(lambda b: int.from_bytes(b, "big", signed=True), p.bytes_n(2)),  # 16-bit integer
-    3: p.map_p(lambda b: int.from_bytes(b, "big", signed=True), p.bytes_n(3)),  # 24-bit integer
-    4: p.map_p(lambda b: int.from_bytes(b, "big", signed=True), p.bytes_n(4)),  # 32-bit integer
-    5: p.map_p(lambda b: int.from_bytes(b, "big", signed=True), p.bytes_n(6)),  # 48-bit integer
+    SERIAL_TYPE_NULL: p.map_p(lambda _: None, p.bytes_n(0)),  # NULL
+    SERIAL_TYPE_INT8: p.map_p(
+        lambda b: int.from_bytes(b, "big", signed=True),
+        p.bytes_n(1),
+    ),  # 8-bit integer
+    SERIAL_TYPE_INT16: p.map_p(
+        lambda b: int.from_bytes(b, "big", signed=True),
+        p.bytes_n(2),
+    ),  # 16-bit integer
+    SERIAL_TYPE_INT24: p.map_p(
+        lambda b: int.from_bytes(b, "big", signed=True),
+        p.bytes_n(3),
+    ),  # 24-bit integer
+    SERIAL_TYPE_INT32: p.map_p(
+        lambda b: int.from_bytes(b, "big", signed=True),
+        p.bytes_n(4),
+    ),  # 32-bit integer
+    SERIAL_TYPE_INT48: p.map_p(
+        lambda b: int.from_bytes(b, "big", signed=True),
+        p.bytes_n(6),
+    ),  # 48-bit integer
 }
 
 
-def parse_record_body(serial_types: list[int]) -> p.Parser[list[ColumnValue]]:
-    """
-    Creates a parser for a record's body based on its serial types.
-    """
+def parse_record_body(serial_types: list[int]) -> p.Parser[tuple[ColumnValue, ...]]:
+    """Create a parser for a record's body based on its serial types."""
     parsers = []
     for st in serial_types:
         if st in serial_type_parsers:
             parsers.append(serial_type_parsers[st])
-        elif st >= 13 and st % 2 != 0:
+        elif st >= SERIAL_TYPE_BLOB_MIN and st % 2 != 0:
             # BLOB
-            blob_len = (st - 13) // 2
+            blob_len = (st - SERIAL_TYPE_BLOB_MIN) // 2
             parsers.append(p.bytes_n(blob_len))
-        elif st >= 12 and st % 2 == 0:
+        elif st >= SERIAL_TYPE_TEXT_MIN and st % 2 == 0:
             # TEXT
-            text_len = (st - 12) // 2
+            text_len = (st - SERIAL_TYPE_TEXT_MIN) // 2
             parsers.append(p.map_p(lambda b: b.decode(), p.bytes_n(text_len)))
         else:
             return p.failure(f"Unknown serial type: {st}")
@@ -160,14 +223,16 @@ def parse_record_body(serial_types: list[int]) -> p.Parser[list[ColumnValue]]:
     return p.sequence(*parsers)
 
 
-def parse_table_leaf_pages(page_num: int, page_size: int) -> p.Parser[Iterable[LeafPage]]:
-    """
-    A recursive parser that traverses a B-Tree and returns a list of
-    all parsed TABLE_LEAF pages, ignoring index pages.
-    """
+def parse_table_leaf_pages(
+    page_num: int,
+    page_size: int,
+) -> p.Parser[Iterable[LeafPage]]:
+    """Recursively traverse a B-Tree and return a list of all parsed leaf pages."""
 
     @p.do
-    def _traverse(current_page_num: int) -> Generator[p.Parser, Any, Iterable[LeafPage]]:
+    def _traverse(
+        current_page_num: int,
+    ) -> Generator[p.Parser, Any, Iterable[LeafPage]]:
         page_start = (current_page_num - 1) * page_size
         offset = 100 if current_page_num == 1 else 0
         yield p.seek(page_start + offset)
@@ -199,10 +264,10 @@ def parse_table_leaf_pages(page_num: int, page_size: int) -> p.Parser[Iterable[L
 
 @p.relocatable
 @p.do
-def parse_interior_page_child_pointers(offset: int) -> Generator[p.Parser, Any, list[int]]:
-    """
-    Parses an interior page to extract all child page pointers.
-    """
+def parse_interior_page_child_pointers(
+    offset: int,
+) -> Generator[p.Parser, Any, list[int]]:
+    """Parse an interior page to extract all child page pointers."""
     header = yield b_tree_interior_page_header
 
     cell_pointers = yield cell_pointer_array(header.cell_count)
@@ -221,17 +286,19 @@ def parse_interior_page_child_pointers(offset: int) -> Generator[p.Parser, Any, 
 
 @dataclass
 class LeafPage:
+    """A leaf page in a B-Tree, containing a header and cells."""
+
     header: BTreeLeafPageHeader
     cells: p.Lazy[list[TableLeafCell]]
 
 
 @p.relocatable
 @p.do
-def parse_leaf_page(offset: int, page_size: int) -> Generator[p.Parser, Any, LeafPage]:
-    """
-    Parses a leaf page, returning a `LeafPage` object with a lazily-evaluated
-    list of cells. This is a relocatable parser.
-    """
+def parse_leaf_page(
+    offset: int,
+    page_size: int,
+) -> Generator[p.Parser, Any, LeafPage]:
+    """Parse a leaf page, returning a `LeafPage` object with lazy-evaluated cells."""
 
     @p.do
     def parse_leaf_page_cells(

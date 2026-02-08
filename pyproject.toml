@@ -2,7 +2,7 @@
 name = "sqlite-parser-local"
 version = "0.1.0"
 description = "Minimal local SQLite parser for experimentation"
-requires-python = ">=3.10"
+requires-python = ">=3.14"
 
 [build-system]
 requires = ["setuptools", "wheel"]
@@ -12,7 +12,20 @@ build-backend = "setuptools.build_meta"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I"]
+select = ["ALL"]
+ignore = [
+    "D105",  # Missing docstring in magic methods
+    "D107",  # Missing docstring in `__init__`
+    "FIX002",  # TODO comments
+    "TD002",  # Missing author in TODO
+    "TD003",  # Missing issue link in TODO
+    "COM812", # Conflicts with ruff formatter
+    "D203", # Conflicts with D211
+    "D213", # Conflicts with D212
+]   
+
+[tool.ruff.lint.per-file-ignores]
+"main.py" = ["T201"] # Allow print statements in main.py
 
 [tool.ruff.format]
 quote-style = "double"
