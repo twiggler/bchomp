@@ -5,7 +5,7 @@ from enum import IntEnum
 from functools import reduce
 from typing import TYPE_CHECKING, Annotated, Any
 
-from sqlite_parser import parser as p
+import bchomp.parser as p
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterable

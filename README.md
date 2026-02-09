@@ -1,18 +1,23 @@
-# SQLite Parser
+# bchomp
 
-A toy SQLite database file parser written in Python using a custom parser-combinator library. This project is an exploration of binary parsing, lazy evaluation, and the elegance of functional parsing techniques.
+![bchomp logo](logo800x436.png)
 
 ## Project Overview
 
-This parser is designed to read a SQLite database file (like the included `chinook.db`) and traverse its B-Tree structure to find and parse records. It is built from scratch with a custom parser-combinator library.
+`bchomp` is a lightweight parser-combinator library for declarative binary parsing in Python. Its primary goal is to make it easy to build small, composable parsers that are readable and testable for large binary formats. The library emphasizes:
+
+- composability of primitive parsers into higher-level grammars,
+- relocatability so parsers can be reused without global seeks,
+- and lazy parsing so expensive payloads are only decoded when needed.
+
+The SQLite file parser at `examples/sqlite.py` is included as a non-core example that demonstrates how to apply `bchomp` to a real-world binary format: B-Tree traversal, record decoding, and on-demand payload parsing. The example is valuable as a usage demonstration, but the library itself is intended to be format-agnostic and reusable for any binary format.
 
 ### Key Features & Concepts
 
-- **Parser-Combinator Library (`parser.py`):** A small, functional library for building complex parsers from simple ones. It includes basic combinators like `sequence`, `choice`, `many`, and `map_p`, as well as file-positioning helpers like `seek` and `position`.
-- **Lazy Evaluation:** The parser uses a `lazy` combinator to defer the parsing of expensive table record payloads. The payload is only parsed from the byte stream when its value is explicitly requested, making initial loading very fast.
-- **Declarative Grammar (`database.py`):** The SQLite file format grammar is defined declaratively using the combinator library. This makes the code highly readable and closely mirrors the official SQLite documentation.
-- **B-Tree Traversal:** The parser can walk the database's B-Tree structure, starting from the root page, to locate the first leaf page where table data is stored.
-- **Composable, Relocatable Parsers:** To solve the problem of absolute seeks breaking parser composability, the library uses a relocation system. The `with_relocation` combinator establishes a new local frame of reference, allowing all subsequent `seek` calls to be relative to that point. Alternatively, parsers can be decorated with `@relocatable`, which does the same.
+- **Parser-Combinator Library (`bchomp/parser.py`):** Core of the project — a small, functional toolkit of primitives and combinators (e.g., `sequence`, `choice`, `many`, `map_p`, `satisfy`) and helpers for working with stream positions (`seek`, `position`).
+- **Lazy Evaluation:** Built-in `lazy`/deferred parsers allow expensive decoding to be postponed until the value is actually needed, enabling fast initial scans of large files.
+- **Relocatable Parsers:** Support for `with_relocation` and the `@relocatable` decorator makes parsers composable without relying on global file offsets.
+- **Declarative Example (`examples/sqlite.py`):** A comprehensive example showing how `bchomp` can be used to parse SQLite files; it demonstrates B-Tree traversal, serial-type handling, and record payload decoding, but it is presented as an application of the library rather than the library itself.
 
 ## Analysis
 
@@ -31,7 +36,7 @@ This parser is designed to read a SQLite database file (like the included `chino
 
 ## Quickstart
 
-First, ensure you have Python 3.10+ installed.
+First, ensure you have Python 3.14+ installed.
 
 1.  **Set up a virtual environment (optional but recommended):**
     ```bash
@@ -40,14 +45,14 @@ First, ensure you have Python 3.10+ installed.
     ```
 
 2.  **Run the parser:**
-    The main entrypoint reads the `chinook.db` file and demonstrates traversing the B-Tree to find and parse the first record in the first leaf page.
+    The main entrypoint is located at `examples/main.py` and reads the example database at `examples/data/chinook.db`. Run it as a module so imports resolve correctly:
     ```bash
-    python3 main.py
+    python3 -m examples.main
     ```
 
 ## Files of Interest
 
-- `main.py`: The main entrypoint that runs the parser.
-- `sqlite_parser/parser.py`: The core parser-combinator library.
-- `sqlite_parser/database.py`: The grammar definition for the SQLite file format.
-- `chinook.db`: A sample SQLite database file for parsing.
+- `examples/main.py`: The main entrypoint that runs the parser.
+- `bchomp/parser.py`: The core parser-combinator library.
+- `examples/sqlite.py`: The SQLite grammar example that uses `bchomp`.
+- `examples/data/chinook.db`: A sample SQLite database file for parsing.

@@ -1,7 +1,7 @@
 [project]
-name = "sqlite-parser-local"
+name = "bchomp"
 version = "0.1.0"
-description = "Minimal local SQLite parser for experimentation"
+description = "bchomp — a small binary parser-combinator library for Python"
 requires-python = ">=3.14"
 
 [build-system]

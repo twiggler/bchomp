@@ -3,8 +3,8 @@
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import sqlite_parser.parser as p
-from sqlite_parser.database import (
+import bchomp.parser as p
+from examples.sqlite import (
     LeafPage,
     read_parse_table_leaf_pages,
 )
@@ -59,7 +59,8 @@ def print_schema_results(leaf_pages: Iterable[LeafPage]) -> None:
 
 def main() -> None:
     """Parse the schema of a SQLite database and print the results."""
-    with Path("chinook.db").open("rb") as f:
+    db_path = Path(__file__).parent / "data" / "chinook.db"
+    with db_path.open("rb") as f:
         reader = p.BinaryIOReader(f)
         result = p.run_parser(parse_schema_table(), reader)
         if isinstance(result, p.Failure):
@@ -70,5 +71,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
     main()

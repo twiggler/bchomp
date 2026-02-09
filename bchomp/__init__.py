@@ -1,0 +1,1 @@
+"""bchomp package initializer."""
