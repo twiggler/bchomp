@@ -2,13 +2,17 @@
 
 import dataclasses
 import os
+import struct
 from collections.abc import Callable, Generator
 from dataclasses import dataclass, replace
+from enum import IntEnum
 from functools import wraps
 from typing import (
     IO,
     Any,
+    Generic,
     Protocol,
+    TypeVar,
     get_args,
 )
 
@@ -122,30 +126,34 @@ class ParserState:
         return len(self.readable)
 
 
-class Success[T]:
+# Make the parser/result type covariant (some checkers are conservative).
+T_co = TypeVar("T_co", covariant=True)
+
+
+@dataclass(frozen=True)
+class Success(Generic[T_co]):  # noqa: UP046
     """Represents a successful parse."""
 
-    def __init__(self, value: T, state: ParserState) -> None:
-        self.value = value
-        self.state = state
+    value: T_co
+    state: ParserState
 
     def __repr__(self) -> str:
         return f"Success(value={self.value}, pos={self.state.pos})"
 
 
+@dataclass(frozen=True)
 class Failure:
     """Represents a failed parse."""
 
-    def __init__(self, message: str, state: ParserState) -> None:
-        self.message = message
-        self.state = state
+    message: str
+    state: ParserState
 
     def __repr__(self) -> str:
         return f"Failure(message='{self.message}', pos={self.state.pos})"
 
 
-type Result[T] = Success[T] | Failure
-type Parser[T] = Callable[[ParserState], Result[T]]
+type Result[T_co] = Success[T_co] | Failure
+type Parser[T_co] = Callable[[ParserState], Result[T_co]]
 
 
 def run_parser[T](parser: Parser[T], data: Readable) -> Result[T]:
@@ -309,16 +317,6 @@ def many[T](p: Parser[T]) -> Parser[list[T]]:
     return _many
 
 
-def uint_be(n: int) -> Parser[int]:
-    """Parse a big-endian unsigned integer of `n` bytes."""
-    return map_p(lambda b: int.from_bytes(b, "big", signed=False), bytes_n(n))
-
-
-uint8 = uint_be(1)
-uint16_be = uint_be(2)
-uint32_be = uint_be(4)
-
-
 def count[T](n: int, parser: Parser[T]) -> Parser[list[T]]:
     """Run a parser n times and return the results as a list."""
     return map_p(list, sequence(*([parser] * n)))  # type: ignore[return-value]
@@ -383,6 +381,15 @@ def failure(message: str) -> Parser[Any]:
         return Failure(message, state)
 
     return _failure
+
+
+def pure[T](value: T) -> Parser[T]:
+    """Return a parser that succeeds with `value` without consuming input."""
+
+    def _pure(state: ParserState) -> Result[T]:
+        return Success(value, state)
+
+    return _pure
 
 
 def peek[T](p: Parser[T]) -> Parser[T]:
@@ -553,3 +560,46 @@ def skip(n: int) -> Parser[None]:
         return Success(value=None, state=replace(state, pos=new_pos))
 
     return _parser
+
+
+def uint_be(n: int) -> Parser[int]:
+    """Parse a big-endian unsigned integer of `n` bytes."""
+    return map_p(lambda b: int.from_bytes(b, "big", signed=False), bytes_n(n))
+
+
+uint8 = uint_be(1)
+uint16_be = uint_be(2)
+uint32_be = uint_be(4)
+
+
+def int_be(n: int) -> Parser[int]:
+    """Parse a big-endian signed integer of `n` bytes."""
+    return map_p(lambda b: int.from_bytes(b, "big", signed=True), bytes_n(n))
+
+
+int8 = int_be(1)
+int16_be = int_be(2)
+int24_be = int_be(3)
+int32_be = int_be(4)
+int48_be = int_be(6)
+int64_be = int_be(8)
+
+
+def float_be(n: int) -> Parser[float]:
+    """Parse a big-endian float of `n` bytes."""
+    return map_p(lambda b: struct.unpack(">d", b)[0], bytes_n(n))
+
+
+@do
+def enum[E: IntEnum](p_int: Parser[int], enum_type: type[E]) -> Generator[Parser, Any, E]:
+    """Parse an int and convert it to `enum_type`.
+
+    On invalid values, yield a failing parser so the overall parser
+    returns a `Failure` (with the original state) and can backtrack.
+    """
+    val = yield p_int
+    try:
+        return enum_type(val)
+    except ValueError:
+        yield failure(f"Invalid {enum_type.__name__} value: {val}")
+        return  # type: ignore[return-value]

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 import sqlite_parser.parser as p
 from sqlite_parser.database import (
     LeafPage,
-    parse_table_leaf_pages,
+    read_parse_table_leaf_pages,
 )
 
 if TYPE_CHECKING:
@@ -31,7 +31,7 @@ def parse_schema_table() -> Generator[p.Parser, Any, Iterable[LeafPage]]:
     # The schema is on page 1, so we start there.
     yield p.seek(0)
 
-    leaf_pages = yield parse_table_leaf_pages(page_num=1, page_size=page_size)
+    leaf_pages = yield read_parse_table_leaf_pages(page_num=1, page_size=page_size)
     return leaf_pages
 
 
