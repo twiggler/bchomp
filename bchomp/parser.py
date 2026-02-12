@@ -8,8 +8,8 @@ from dataclasses import dataclass, replace
 from enum import IntEnum
 from functools import wraps
 from typing import (
-    IO,
     Any,
+    BinaryIO,
     Generic,
     Protocol,
     TypeVar,
@@ -71,7 +71,7 @@ class BytesReader:
 class BinaryIOReader:
     """An implementation of the Readable protocol for a file-like object."""
 
-    def __init__(self, f: IO[bytes]) -> None:
+    def __init__(self, f: BinaryIO) -> None:
         self._f = f
         # Get the total size by seeking to the end and back.
         self._f.seek(0, os.SEEK_END)

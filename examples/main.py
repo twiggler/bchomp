@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import bchomp.parser as p
+from bchomp.adapters.cstruct import from_cstruct
+from examples.c_header import c_header
 from examples.sqlite import (
     LeafPage,
     read_parse_table_leaf_pages,
@@ -27,6 +29,12 @@ def parse_schema_table() -> Generator[p.Parser, Any, Iterable[LeafPage]]:
     page_size_val = yield p.uint16_be
     # A page size of 1 means 65536
     page_size = page_size_val if page_size_val != 1 else 65536
+
+    # Alternatively, we can use cstruct to parse the header:
+    yield p.seek(0)
+    header = yield from_cstruct(c_header.header)
+    if header.schema_format_number != 1:
+        yield p.failure(f"Unsupported schema format number: {header.schema_format_number}")
 
     # The schema is on page 1, so we start there.
     yield p.seek(0)

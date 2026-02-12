@@ -32,7 +32,7 @@ The SQLite file parser at `examples/sqlite.py` is included as a non-core example
 
 ## Roadmap
 
-- **`dissect.cstruct` Adapters:** To dramatically improve performance, we plan to introduce adapters that leverage the `dissect.cstruct` library for parsing binary data. This will allow us to replace pure Python parsing functions with highly optimized implementations where possible, while still retaining the declarative, high-level structure of the parser-combinator library.
+- **`dissect.cstruct` Adapter (implemented):** A small adapter has been added to bridge `dissect.cstruct` types to `bchomp` parsers. See `bchomp/adapters/cstruct.py` for `from_cstruct(...)`, which wraps a cstruct-style reader as a `bchomp` parser. This lets you reuse compiled cstruct readers (zero-copy where possible) while keeping the combinator-based control flow.
 
 ## Quickstart
 
@@ -56,3 +56,4 @@ First, ensure you have Python 3.14+ installed.
 - `bchomp/parser.py`: The core parser-combinator library.
 - `examples/sqlite.py`: The SQLite grammar example that uses `bchomp`.
 - `examples/data/chinook.db`: A sample SQLite database file for parsing.
+- `bchomp/adapters/cstruct.py`: Adapter that converts cstruct readers into `bchomp` parsers (`from_cstruct`).
