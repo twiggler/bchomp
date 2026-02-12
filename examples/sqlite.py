@@ -3,9 +3,10 @@
 from dataclasses import dataclass
 from enum import IntEnum
 from functools import reduce
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, Protocol
 
 import bchomp.parser as p
+from bchomp.adapters.lazy import lazy, make_lazy
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterable
@@ -64,12 +65,11 @@ class TableLeafCell:
     payload: Record
 
 
-@dataclass
-class LeafPage:
+class LeafPage(Protocol):
     """A leaf page in a B-Tree, containing a header and cells."""
 
     header: LeafPageHeader
-    cells: p.Lazy[list[TableLeafCell]]
+    cells: list[TableLeafCell]
 
 
 ColumnValue = int | None | bytes | str | float
@@ -359,9 +359,10 @@ def read_leaf_page(
 
     header, header_size = yield p.with_bytes_read(read_leaf_page_header)
 
-    lazy_cells = yield p.lazy(
+    lazy_leaf_page = make_lazy(LeafPage, lazy_fields=["cells"])
+    lazy_cells = yield lazy(
         page_size - header_size,
         lambda _: parse_leaf_page_cells(header.cell_count),
     )
 
-    return LeafPage(header=header, cells=lazy_cells)
+    return lazy_leaf_page(header=header, cells=lazy_cells)

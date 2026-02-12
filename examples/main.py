@@ -49,7 +49,7 @@ def print_schema_results(leaf_pages: Iterable[LeafPage]) -> None:
         print(f"Found leaf page with header: {leaf_page.header}")
 
         # The cells are lazy, so accessing them will trigger parsing.
-        for cell in leaf_page.cells.value:
+        for cell in leaf_page.cells:
             # The payload of the cell is a Record object.
             # For the sqlite_schema table, the columns are:
             # type, name, tbl_name, rootpage, sql

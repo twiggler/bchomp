@@ -16,6 +16,7 @@ The SQLite file parser at `examples/sqlite.py` is included as a non-core example
 
 - **Parser-Combinator Library (`bchomp/parser.py`):** Core of the project — a small, functional toolkit of primitives and combinators (e.g., `sequence`, `choice`, `many`, `map_p`, `satisfy`) and helpers for working with stream positions (`seek`, `position`).
 - **Lazy Evaluation:** Built-in `lazy`/deferred parsers allow expensive decoding to be postponed until the value is actually needed, enabling fast initial scans of large files.
+     Note: laziness is implemented by automatically creating lazily-wrapped classes via `make_lazy` that preserve the protocol-based interface. This decouples deferred evaluation from the public API so callers normally don't need to access `.value` directly — evaluation is interface-preserving and happens transparently.
 - **Relocatable Parsers:** Support for `with_relocation` and the `@relocatable` decorator makes parsers composable without relying on global file offsets.
 - **Declarative Example (`examples/sqlite.py`):** A comprehensive example showing how `bchomp` can be used to parse SQLite files; it demonstrates B-Tree traversal, serial-type handling, and record payload decoding, but it is presented as an application of the library rather than the library itself.
 
@@ -29,6 +30,15 @@ The SQLite file parser at `examples/sqlite.py` is included as a non-core example
 ### Cons
 - **Performance:** As a pure Python implementation running on CPython, it will be significantly slower than production-grade parsers written in systems languages like C or Rust. This is expected for a project of this nature.
 - **Error Reporting:** Error messages are currently basic. A production-ready parser would require more sophisticated error reporting to provide better context on failures.
+- **Do-notation typing:** The `@do` generator-based notation is ergonomically nice but it loses precise return-type information for static type checkers; the wrapper around generator functions prevents some tools from inferring the parser result type, so you may need to add explicit casts or annotations when strong typing is required.
+ - **Do-notation typing:** The `@do` generator-based notation is ergonomically nice but it can lose precise type information for static type checkers unless you annotate the generator correctly:
+
+   Correct form (static-checker friendly):
+
+   ```py
+       lazy_content_stream: p.ParserState = yield p.take(size, p.get_state())
+       # now `lazy_content_stream` is known to be `p.ParserState` to the type checker
+   ```
 
 ## Roadmap
 
@@ -57,3 +67,4 @@ First, ensure you have Python 3.14+ installed.
 - `examples/sqlite.py`: The SQLite grammar example that uses `bchomp`.
 - `examples/data/chinook.db`: A sample SQLite database file for parsing.
 - `bchomp/adapters/cstruct.py`: Adapter that converts cstruct readers into `bchomp` parsers (`from_cstruct`).
+ - `bchomp/lazy.py`: Helpers related to lazy/deferred parsing and wrappers.
