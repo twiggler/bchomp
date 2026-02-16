@@ -21,7 +21,8 @@ ignore = [
     "TD003",  # Missing issue link in TODO
     "COM812", # Conflicts with ruff formatter
     "D203", # Conflicts with D211
-    "D213", # Conflicts with D212
+    "D213", # Conflicts with D212,
+    "UP047",  "UP046" # Some type checkers do not infer covariance
 ]   
 
 [tool.ruff.lint.per-file-ignores]

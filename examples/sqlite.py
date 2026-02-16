@@ -9,7 +9,7 @@ import bchomp.parser as p
 from bchomp.adapters.lazy import lazy, make_lazy
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterable
+    from collections.abc import Generator
 
 
 class PageType(IntEnum):
@@ -75,7 +75,7 @@ class LeafPage(Protocol):
 ColumnValue = int | None | bytes | str | float
 
 
-def read_varint(state: p.ParserState) -> p.Result[int]:
+def read_varint(state: p.ParserState) -> p.BlockingResult[int]:
     """Parse a variable-length integer (varint)."""
 
     def process_bytes(parts: tuple[list[int], int]) -> int:
@@ -95,7 +95,7 @@ parse_page_type = p.enum(p.uint8, PageType)
 
 
 @p.do
-def read_serial_type() -> Generator[p.Parser, Any, SerialKind]:
+def read_serial_type() -> Generator[p.BlockingParser, Any, SerialKind]:
     """Parse a varint and return either a `SerialType`, `Blob`, or `Text`.
 
     For serial-type values >= 12, the value encodes a BLOB or TEXT with a
@@ -146,10 +146,10 @@ class InteriorPageHeader(PageHeaderBase):
 LeafPageHeader = PageHeaderBase
 
 
-read_interior_page_header: p.Parser[InteriorPageHeader] = p.create_parser_from_dataclass(
+read_interior_page_header: p.BlockingParser[InteriorPageHeader] = p.create_parser_from_dataclass(
     InteriorPageHeader,
 )
-read_leaf_page_header: p.Parser[LeafPageHeader] = p.create_parser_from_dataclass(
+read_leaf_page_header: p.BlockingParser[LeafPageHeader] = p.create_parser_from_dataclass(
     LeafPageHeader,
 )
 
@@ -167,13 +167,13 @@ class Record:
     values: list[ColumnValue]
 
 
-def read_cell_pointer_array(cell_count: int) -> p.Parser[list[int]]:
+def read_cell_pointer_array(cell_count: int) -> p.BlockingParser[list[int]]:
     """Parse an array of cell pointers."""
     return p.count(cell_count, p.uint16_be)
 
 
 @p.do
-def read_record_header() -> Generator[p.Parser, Any, tuple[int, list[SerialKind]]]:
+def read_record_header() -> Generator[p.BlockingParser, Any, tuple[int, list[SerialKind]]]:
     """Parse the record header using do-notation for clarity.
 
     Returns:
@@ -192,7 +192,7 @@ def read_record_header() -> Generator[p.Parser, Any, tuple[int, list[SerialKind]
 
 
 @p.do
-def read_record(payload_size: int) -> Generator[p.Parser, Any, Record]:
+def read_record(payload_size: int) -> Generator[p.BlockingParser, Any, Record]:
     """Parse a record of a given size."""
     header_size, header_content = yield read_record_header()
 
@@ -205,7 +205,7 @@ def read_record(payload_size: int) -> Generator[p.Parser, Any, Record]:
 
 
 @p.do
-def read_table_interior_cell() -> Generator[p.Parser, Any, int]:
+def read_table_interior_cell() -> Generator[p.BlockingParser, Any, int]:
     """Parse a table interior cell to find the left-child pointer.
 
     An interior cell format is:
@@ -220,7 +220,7 @@ def read_table_interior_cell() -> Generator[p.Parser, Any, int]:
 
 
 @p.do
-def read_table_leaf_cell() -> Generator[p.Parser, Any, TableLeafCell]:
+def read_table_leaf_cell() -> Generator[p.BlockingParser, Any, TableLeafCell]:
     """Parse a table leaf cell."""
     payload_size = yield read_varint
     row_id = yield read_varint
@@ -232,7 +232,7 @@ def read_table_leaf_cell() -> Generator[p.Parser, Any, TableLeafCell]:
     return TableLeafCell(rowid=row_id, payload=payload)
 
 
-def read_column_value(st: SerialKind) -> p.Parser[ColumnValue]:  # noqa: C901, PLR0911, PLR0912
+def read_column_value(st: SerialKind) -> p.BlockingParser[ColumnValue]:  # noqa: C901, PLR0911, PLR0912
     """Return a parser for a single column value described by the serial kind."""
     match st:
         case Blob(size=size):
@@ -263,7 +263,9 @@ def read_column_value(st: SerialKind) -> p.Parser[ColumnValue]:  # noqa: C901, P
             return p.failure(f"Unsupported serial kind: {st}")
 
 
-def read_parse_record_body(serial_types: list[SerialKind]) -> p.Parser[tuple[ColumnValue, ...]]:
+def read_parse_record_body(
+    serial_types: list[SerialKind],
+) -> p.BlockingParser[tuple[ColumnValue, ...]]:
     """Create a parser for a record's body based on its serial types.
 
     `serial_types` is a list of `SerialKind` items (either a `SerialType`
@@ -278,13 +280,13 @@ def read_parse_record_body(serial_types: list[SerialKind]) -> p.Parser[tuple[Col
 def read_parse_table_leaf_pages(
     page_num: int,
     page_size: int,
-) -> p.Parser[Iterable[LeafPage]]:
+) -> p.StreamingParser[LeafPage]:
     """Recursively traverse a B-Tree and return a list of all parsed leaf pages."""
 
     @p.do
     def _traverse(
         current_page_num: int,
-    ) -> Generator[p.Parser, Any, Iterable[LeafPage]]:
+    ) -> Generator[p.Parser, Any]:
         page_start = (current_page_num - 1) * page_size
         offset = 100 if current_page_num == 1 else 0
         yield p.seek(page_start + offset)
@@ -294,21 +296,13 @@ def read_parse_table_leaf_pages(
         if page_type == PageType.TABLE_LEAF:
             # This is a table leaf page, parse it and return.
             leaf_page = yield read_leaf_page(offset, page_size)
-            return [leaf_page]
+            yield p.emit(leaf_page)
 
         elif page_type == PageType.TABLE_INTERIOR:
             # This is a table interior page. Get the child pointers to recurse.
             child_page_pointers = yield read_interior_page_child_pointers(offset)
-            found_pages = []
             for child_page_num in child_page_pointers:
-                child_results = yield _traverse(child_page_num)
-                found_pages.extend(child_results)
-
-            return found_pages
-        else:
-            # This is an index page or other type we don't care about.
-            # Stop traversing this branch by returning an empty list.
-            return []
+                yield _traverse(child_page_num)
 
     return _traverse(page_num)
 
@@ -317,7 +311,7 @@ def read_parse_table_leaf_pages(
 @p.do
 def read_interior_page_child_pointers(
     offset: int,
-) -> Generator[p.Parser, Any, list[int]]:
+) -> Generator[p.BlockingParser, Any, list[int]]:
     """Parse an interior page to extract all child page pointers."""
     header = yield read_interior_page_header
 
@@ -340,13 +334,13 @@ def read_interior_page_child_pointers(
 def read_leaf_page(
     offset: int,
     page_size: int,
-) -> Generator[p.Parser, Any, LeafPage]:
+) -> Generator[p.BlockingParser, Any, LeafPage]:
     """Parse a leaf page, returning a `LeafPage` object with lazy-evaluated cells."""
 
     @p.do
     def parse_leaf_page_cells(
         cell_count: int,
-    ) -> Generator[p.Parser, Any, list[TableLeafCell]]:
+    ) -> Generator[p.BlockingParser, Any, list[TableLeafCell]]:
         cell_pointers = yield read_cell_pointer_array(cell_count)
 
         cells = []

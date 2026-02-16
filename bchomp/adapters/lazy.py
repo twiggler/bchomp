@@ -32,7 +32,9 @@ class Lazy[T]:
 
 
 @p.do
-def lazy[T](size: int, parser: Callable[[int], p.Parser[T]]) -> Generator[p.Parser, Any, Lazy[T]]:
+def lazy[T](
+    size: int, parser: Callable[[int], p.BlockingParser[T]]
+) -> Generator[p.BlockingParser, Any, Lazy[T]]:
     """Create a lazy-evaluated value by parsing a block of a given size.
 
     This combinator is essential for performance. It immediately skips the

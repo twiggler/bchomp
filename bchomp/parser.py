@@ -1,9 +1,11 @@
 """A monadic parser combinator library for binary data."""
 
+from __future__ import annotations
+
 import dataclasses
 import os
 import struct
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Iterator
 from dataclasses import dataclass, replace
 from enum import IntEnum
 from functools import wraps
@@ -14,6 +16,7 @@ from typing import (
     Protocol,
     TypeVar,
     get_args,
+    overload,
 )
 
 
@@ -105,10 +108,12 @@ class ParserState:
 
 # Make the parser/result type covariant (some checkers are conservative).
 T_co = TypeVar("T_co", covariant=True)
+U_co = TypeVar("U_co", covariant=True)
+Y_co = TypeVar("Y_co", covariant=True)
 
 
 @dataclass(frozen=True)
-class Success(Generic[T_co]):  # noqa: UP046
+class Success(Generic[T_co]):
     """Represents a successful parse."""
 
     value: T_co
@@ -129,11 +134,26 @@ class Failure:
         return f"Failure(message='{self.message}', pos={self.state.pos})"
 
 
-type Result[T_co] = Success[T_co] | Failure
-type Parser[T_co] = Callable[[ParserState], Result[T_co]]
+@dataclass(frozen=True)
+class Suspend(Generic[T_co, Y_co]):
+    """Represents a suspended parser for streaming."""
+
+    value: Y_co
+    resume: Parser[T_co, Y_co]
+    state: ParserState
+
+    def __repr__(self) -> str:
+        return f"Suspend(state={self.state.pos})"
 
 
-def run_parser[T](parser: Parser[T], data: Readable) -> Result[T]:
+type Result[T_co, Y_co] = Success[T_co] | Failure | Suspend[T_co, Y_co]
+type BlockingResult[T_co] = Success[T_co] | Failure
+type Parser[T_co, Y_co] = Callable[[ParserState], Result[T_co, Y_co]]
+type BlockingParser[T_co] = Callable[[ParserState], BlockingResult[T_co]]
+type StreamingParser[Y_co] = Callable[[ParserState], Result[None, Y_co]]
+
+
+def run_parser[T_co](parser: BlockingParser[T_co], data: Readable) -> BlockingResult[T_co]:
     """Run a parser on a readable data source."""
     # Initialize with a root anchor at position 0. This allows `seek` to
     # function as an absolute seek from the start of the file when used
@@ -142,10 +162,22 @@ def run_parser[T](parser: Parser[T], data: Readable) -> Result[T]:
     return parser(state)
 
 
-def bytes_n(n: int) -> Parser[bytes]:
+def stream(parser: StreamingParser[Y_co], data: Readable) -> Iterator[Y_co]:
+    """Run a streaming parser on a readable data source, yielding emitted values."""
+    state = ParserState(data, anchors=(0,))
+    result = parser(state)
+    while isinstance(result, Suspend):
+        yield result.value
+        result = result.resume(result.state)
+    if isinstance(result, Failure):
+        msg = f"Parsing failed: {result.message} at pos {result.state.pos}"
+        raise ValueError(msg)  # noqa: TRY004
+
+
+def bytes_n(n: int) -> BlockingParser[bytes]:
     """Parse n bytes."""
 
-    def _bytes_n(state: ParserState) -> Result[bytes]:
+    def _bytes_n(state: ParserState) -> BlockingResult[bytes]:
         read_bytes = state.readable.read(n, state.pos)
         if len(read_bytes) < n:
             return Failure(
@@ -157,10 +189,55 @@ def bytes_n(n: int) -> Parser[bytes]:
     return _bytes_n
 
 
-def map_p[T, R](fn: Callable[[T], R], p: Parser[T]) -> Parser[R]:
+def chain(
+    result: Result[T_co, Y_co], on_success: Callable[[Success[T_co]], Result[U_co, Y_co]]
+) -> Result[U_co, Y_co]:
+    """Handle the result of a parser and determine the next step.
+
+    This function acts as a combinator for parser results, enabling chaining and control flow:
+    - If the result is a Suspend, it wraps the resume function recursively, allowing streaming
+      parsers to emit values and continue parsing.
+    - If the result is a Success, it invokes the provided on_success callback with the successful
+      value, enabling further parsing steps.
+    - If the result is a Failure, it propagates the failure unchanged, allowing backtracking
+      or error handling.
+    """
+    # TODO: Optimize using trampoline because Python has no tail-call elimination.
+
+    # On Suspend, we wrap it (Recursive step)
+    if isinstance(result, Suspend):
+
+        def resume_wrapper(s: ParserState) -> Result[U_co, Y_co]:
+            return chain(result.resume(s), on_success)
+
+        return Suspend(result.value, resume_wrapper, result.state)
+
+    # On Success, we run the next step
+    if isinstance(result, Success):
+        return on_success(result)
+
+    # 3. Failure passes through
+    return result
+
+
+def bind_p[T, Y, R](p: Parser[T, Y], f: Callable[[T], Parser[R, Y]]) -> Parser[R, Y]:
+    """Apply a function to the result of a parser (monadic bind).
+
+    Runs parser `p`, and if it succeeds, passes its result to function `f`.
+    `f` must return a new parser, which is then run on the stream.
+    """
+
+    def _bind_p(state: ParserState) -> Result[R, Y]:
+        initial_result = p(state)
+        return chain(initial_result, lambda success: f(success.value)(success.state))
+
+    return _bind_p
+
+
+def map_p(fn: Callable[[T_co], U_co], p: BlockingParser[T_co]) -> BlockingParser[U_co]:
     """Map a function over the result of a parser."""
 
-    def _map_p(state: ParserState) -> Result[R]:
+    def _map_p(state: ParserState) -> BlockingResult[U_co]:
         result = p(state)
         if isinstance(result, Failure):
             return result
@@ -172,7 +249,7 @@ def map_p[T, R](fn: Callable[[T], R], p: Parser[T]) -> Parser[R]:
 any_byte = map_p(lambda b: b[0], bytes_n(1))
 
 
-def seek(offset: int) -> Parser[None]:
+def seek(offset: int) -> BlockingParser[None]:
     """Move the stream to a position relative to the current anchor.
 
     If no anchor is set, seeks relative to the start of the stream.
@@ -180,7 +257,7 @@ def seek(offset: int) -> Parser[None]:
     The check for validity is deferred to the next read operation.
     """
 
-    def _seek_rel(state: ParserState) -> Result[None]:
+    def _seek_rel(state: ParserState) -> BlockingResult[None]:
         base_pos = state.anchors[-1]
         new_pos = base_pos + offset
         return Success(None, replace(state, pos=new_pos))
@@ -188,7 +265,7 @@ def seek(offset: int) -> Parser[None]:
     return _seek_rel
 
 
-def with_relocation[T](p: Parser[T]) -> Parser[T]:
+def with_relocation(p: Parser[T_co, Y_co]) -> Parser[T_co, Y_co]:
     """Create a new local frame of reference for seeking.
 
     It runs a parser `p` within an "relocated" context. Any `seek` calls
@@ -197,45 +274,45 @@ def with_relocation[T](p: Parser[T]) -> Parser[T]:
     perform seeks without breaking backtracking.
     """
 
-    def _relocatable(state: ParserState) -> Result[T]:
+    def _relocatable(state: ParserState) -> Result[T_co, Y_co]:
         # Create a new stream with the current position added to the anchor stack.
         anchored_state = replace(state, anchors=(*state.anchors, state.pos))
 
         # Run the wrapped parser in this new anchored context.
         result = p(anchored_state)
 
-        if isinstance(result, Failure):
-            # On failure, we return the failure but with the *original* stream,
-            # preserving the backtracking contract.
-            return Failure(result.message, state)
-
         # On success, calculate bytes consumed inside the anchor and advance
         # the outer stream by that amount, discarding the anchor.
-        bytes_consumed = result.state.pos - state.pos
-        final_state = replace(state, pos=state.pos + bytes_consumed)
-        return Success(result.value, final_state)
+        def on_success(result: Success[T_co]) -> Result[T_co, Y_co]:
+            bytes_consumed = result.state.pos - state.pos
+            new_state = replace(state, pos=state.pos + bytes_consumed)
+            return Success(result.value, new_state)
+
+        return chain(result, on_success)
 
     return _relocatable
 
 
-def relocatable[T](parser_producer: Callable[..., Parser[T]]) -> Callable[..., Parser[T]]:
+def relocatable(
+    parser_producer: Callable[..., Parser[T_co, Y_co]],
+) -> Callable[..., Parser[T_co, Y_co]]:
     """Make a parser-producing function create a relocatable parser.
 
     This automatically wraps the returned parser in `with_relocation`.
     """
 
     @wraps(parser_producer)
-    def wrapper(*args: Any, **kwargs: Any) -> Parser[T]:  # noqa: ANN401
+    def wrapper(*args: Any, **kwargs: Any) -> Parser[T_co, Y_co]:  # noqa: ANN401
         parser = parser_producer(*args, **kwargs)
         return with_relocation(parser)
 
     return wrapper
 
 
-def satisfy(predicate: Callable[[int], bool]) -> Parser[int]:
+def satisfy(predicate: Callable[[int], bool]) -> BlockingParser[int]:
     """Parse a single byte and check if it satisfies a predicate."""
 
-    def _satisfy(state: ParserState) -> Result[int]:
+    def _satisfy(state: ParserState) -> BlockingResult[int]:
         result = any_byte(state)
         if isinstance(result, Failure):
             return result
@@ -246,12 +323,12 @@ def satisfy(predicate: Callable[[int], bool]) -> Parser[int]:
     return _satisfy
 
 
-def byte(b: int) -> Parser[int]:
+def byte(b: int) -> BlockingParser[int]:
     """Parse a specific byte."""
     return satisfy(lambda x: x == b)
 
 
-def sequence(*parsers: Parser) -> Parser[tuple]:
+def sequence(*parsers: BlockingParser) -> BlockingParser[tuple]:
     """Run a sequence of parsers and return their results as a tuple.
 
     Note: This uses a simplified type signature because of a limitation in
@@ -263,7 +340,7 @@ def sequence(*parsers: Parser) -> Parser[tuple]:
     See: https://github.com/microsoft/pyright/issues/3187
     """
 
-    def _sequence(state: ParserState) -> Result[tuple]:
+    def _sequence(state: ParserState) -> BlockingResult[tuple]:
         results = []
         current_state = state
         for p in parsers:
@@ -277,10 +354,10 @@ def sequence(*parsers: Parser) -> Parser[tuple]:
     return _sequence
 
 
-def many[T](p: Parser[T]) -> Parser[list[T]]:
+def many[T](p: BlockingParser[T]) -> BlockingParser[list[T]]:
     """Run a parser zero or more times and return the results as a list."""
 
-    def _many(state: ParserState) -> Result[list[T]]:
+    def _many(state: ParserState) -> BlockingResult[list[T]]:
         results = []
         current_state = state
         while True:
@@ -294,60 +371,37 @@ def many[T](p: Parser[T]) -> Parser[list[T]]:
     return _many
 
 
-def count[T](n: int, parser: Parser[T]) -> Parser[list[T]]:
+def count[T](n: int, parser: BlockingParser[T]) -> BlockingParser[list[T]]:
     """Run a parser n times and return the results as a list."""
-    return map_p(list, sequence(*([parser] * n)))  # type: ignore[return-value]
+    return map_p(list, sequence(*([parser] * n)))
 
 
-def bind_p[T, R](p: Parser[T], f: Callable[[T], Parser[R]]) -> Parser[R]:
-    """Apply a function to the result of a parser (monadic bind).
-
-    Runs parser `p`, and if it succeeds, passes its result to function `f`.
-    `f` must return a new parser, which is then run on the stream.
-    """
-
-    def _bind_p(state: ParserState) -> Result[R]:
-        initial_result = p(state)
-        if isinstance(initial_result, Failure):
-            return initial_result
-
-        new_parser = f(initial_result.value)
-        return new_parser(initial_result.state)
-
-    return _bind_p
-
-
-def string(s: str) -> Parser[str]:
+def string(s: str) -> BlockingParser[str]:
     """Parse a specific string."""
     return map_p(lambda x: x.decode("utf-8"), bytes_n(len(s.encode("utf-8"))))
 
 
-def position() -> Parser[int]:
-    """Return the current position in the stream.
-
-    This is useful for calculations that depend on the
-    size of a parsed block.
-    """
-
-    def _position(state: ParserState) -> Result[int]:
-        return Success(state.pos, state)
-
-    return _position
-
-
-def get_state() -> Parser[ParserState]:
+def get_state() -> BlockingParser[ParserState]:
     """Return the current stream object.
 
     This is useful within a `do` block to get access to the stream.
     """
 
-    def _get_stream(state: ParserState) -> Result[ParserState]:
+    def _get_state(state: ParserState) -> BlockingResult[ParserState]:
         return Success(state, state)
 
-    return _get_stream
+    return _get_state
 
 
-def failure(message: str) -> Parser[Any]:
+def position() -> BlockingParser[int]:
+    """Return the current position in the stream.
+
+    This is useful for calculations that depend on the size of a parsed block.
+    """
+    return map_p(lambda s: s.pos, get_state())
+
+
+def failure(message: str) -> BlockingParser[T_co]:
     """Create a parser that always fails with the given message.
 
     This is useful for reporting custom error messages within a `do` block
@@ -360,16 +414,16 @@ def failure(message: str) -> Parser[Any]:
     return _failure
 
 
-def pure[T](value: T) -> Parser[T]:
+def pure[T](value: T) -> BlockingParser[T]:
     """Return a parser that succeeds with `value` without consuming input."""
 
-    def _pure(state: ParserState) -> Result[T]:
+    def _pure(state: ParserState) -> BlockingResult[T]:
         return Success(value, state)
 
     return _pure
 
 
-def peek[T](p: Parser[T]) -> Parser[T]:
+def peek[T](p: BlockingParser[T]) -> BlockingParser[T]:
     """Run a parser `p` without consuming any input.
 
     It returns the result of `p`, but the stream position is reset to
@@ -377,7 +431,7 @@ def peek[T](p: Parser[T]) -> Parser[T]:
     in the stream to decide which parser to use next.
     """
 
-    def _peek(state: ParserState) -> Result[T]:
+    def _peek(state: ParserState) -> BlockingResult[T]:
         result = p(state)
         if isinstance(result, Failure):
             return result
@@ -387,7 +441,15 @@ def peek[T](p: Parser[T]) -> Parser[T]:
     return _peek
 
 
-def take[T](n: int, p: Parser[T]) -> Parser[T]:
+@overload
+def take(n: int, p: BlockingParser[T_co]) -> BlockingParser[T_co]: ...
+
+
+@overload
+def take(n: int, p: Parser[T_co, Y_co]) -> Parser[T_co, Y_co]: ...
+
+
+def take(n, p) -> Parser[T_co, Y_co]:
     """Create a parser that runs another parser within a limited byte context.
 
     This combinator is implemented by creating a sub-parser that is first
@@ -395,37 +457,29 @@ def take[T](n: int, p: Parser[T]) -> Parser[T]:
     This demonstrates how more complex combinators can be built from simpler ones.
     """
 
-    @do
-    def _take_impl() -> Generator[Parser, Any, T]:
+    def _take_impl(current_state: ParserState) -> Result[T_co, Y_co]:
         # Get the current stream to calculate the sub-reader's offset and data source.
-        current_state = yield get_state()
-
         # Create a SubReader for the next `n` bytes.
         sub_reader = SubReader(
             base_reader=current_state.readable,
             base_offset=current_state.pos,
             length=n,
         )
+
         # The new state uses the SubReader, but `pos` is still absolute.
         scoped_state = replace(current_state, readable=sub_reader)
 
-        # Run the provided parser `p` on the scoped state.
-        # The SubReader will enforce the boundary.
-        result = p(scoped_state)
+        return chain(
+            p(scoped_state),
+            lambda success: Success(
+                success.value, replace(current_state, pos=current_state.pos + n)
+            ),
+        )
 
-        if isinstance(result, Failure):
-            yield failure(f"Parser failed within take({n}): {result.message}")
-            return  # type: ignore[return-value]
-
-        # If the inner parser succeeds, we advance the outer stream's position by `n` bytes.
-        yield skip(n)
-
-        return result.value
-
-    return _take_impl()
+    return _take_impl
 
 
-def create_parser_from_dataclass(dc: type) -> Parser:
+def create_parser_from_dataclass(dc: type) -> BlockingParser:
     """Automatically create a parser for a dataclass from Annotated metadata.
 
     It inspects the dataclass's type hints. For fields annotated as
@@ -444,7 +498,17 @@ def create_parser_from_dataclass(dc: type) -> Parser:
     return map_p(lambda results: dc(*results), sequence(*field_parsers))
 
 
-def do[R](fn: Callable[..., Generator[Parser, Any, R]]) -> Callable[..., Parser[R]]:
+@overload
+def do(
+    fn: Callable[..., Generator[BlockingParser, Any, T_co]],
+) -> Callable[..., BlockingParser[T_co]]: ...
+
+
+@overload
+def do(fn: Callable[..., Generator[Parser, Any]]) -> Callable[..., Parser]: ...
+
+
+def do(fn) -> Callable[..., Parser]:
     """Enable monadic comprehensions (do-notation) for parsers.
 
     This allows writing complex, sequential parsers in a
@@ -457,21 +521,19 @@ def do[R](fn: Callable[..., Generator[Parser, Any, R]]) -> Callable[..., Parser[
     """
 
     @wraps(fn)
-    def wrapper(*args: Any, **kwargs: Any) -> Parser[R]:  # noqa: ANN401
-        def _do(state: ParserState) -> Result[R]:
+    def wrapper(*args: Any, **kwargs: Any) -> Parser[T_co, Y_co]:  # noqa: ANN401
+        def _do(state: ParserState) -> Result[T_co, Y_co]:
             gen = fn(*args, **kwargs)
 
             def step(
-                g: Generator[Parser, Any, R],
+                g: Generator[Parser, Any, T_co],
                 state: ParserState,
                 value: Any | None = None,  # noqa: ANN401
-            ) -> Result[R]:
+            ) -> Result[T_co, Y_co]:
                 try:
                     p = g.send(value)
                     result = p(state)
-                    if isinstance(result, Failure):
-                        return result
-                    return step(g, result.state, result.value)
+                    return chain(result, lambda r: step(g, r.state, r.value))
                 except StopIteration as e:
                     # The generator has finished, its return value is the final result.
                     return Success(e.value, state)
@@ -483,8 +545,20 @@ def do[R](fn: Callable[..., Generator[Parser, Any, R]]) -> Callable[..., Parser[
     return wrapper
 
 
+def emit[Y_co](value: Y_co) -> StreamingParser[Y_co]:
+    """Create a streaming parser that emits a value without consuming input.
+
+    This is useful for producing intermediate results in a streaming context.
+    """
+
+    def _emit(state: ParserState) -> Result[None, Y_co]:
+        return Suspend(value=value, resume=lambda s: Success(None, s), state=state)
+
+    return _emit
+
+
 @do
-def with_bytes_read[T](parser: Parser[T]) -> Generator[Parser, Any, tuple[T, int]]:
+def with_bytes_read[T](parser: BlockingParser[T]) -> Generator[BlockingParser, Any, tuple[T, int]]:
     """Return the result of a parser and the number of bytes it consumed."""
     start_pos = yield position()
     result = yield parser
@@ -493,20 +567,7 @@ def with_bytes_read[T](parser: Parser[T]) -> Generator[Parser, Any, tuple[T, int
     return result, bytes_read
 
 
-def skip(n: int) -> Parser[None]:
-    """Skip n bytes, failing if there are not enough bytes."""
-
-    def _parser(state: ParserState) -> Result[None]:
-        if n < 0 or n > len(state):
-            return Failure(message="Not enough bytes to skip", state=state)
-
-        new_pos = state.pos + n
-        return Success(value=None, state=replace(state, pos=new_pos))
-
-    return _parser
-
-
-def uint_be(n: int) -> Parser[int]:
+def uint_be(n: int) -> BlockingParser[int]:
     """Parse a big-endian unsigned integer of `n` bytes."""
     return map_p(lambda b: int.from_bytes(b, "big", signed=False), bytes_n(n))
 
@@ -516,7 +577,7 @@ uint16_be = uint_be(2)
 uint32_be = uint_be(4)
 
 
-def int_be(n: int) -> Parser[int]:
+def int_be(n: int) -> BlockingParser[int]:
     """Parse a big-endian signed integer of `n` bytes."""
     return map_p(lambda b: int.from_bytes(b, "big", signed=True), bytes_n(n))
 
@@ -529,13 +590,15 @@ int48_be = int_be(6)
 int64_be = int_be(8)
 
 
-def float_be(n: int) -> Parser[float]:
+def float_be(n: int) -> BlockingParser[float]:
     """Parse a big-endian float of `n` bytes."""
     return map_p(lambda b: struct.unpack(">d", b)[0], bytes_n(n))
 
 
 @do
-def enum[E: IntEnum](p_int: Parser[int], enum_type: type[E]) -> Generator[Parser, Any, E]:
+def enum[E: IntEnum](
+    p_int: BlockingParser[int], enum_type: type[E]
+) -> Generator[BlockingParser, Any, E]:
     """Parse an int and convert it to `enum_type`.
 
     On invalid values, yield a failing parser so the overall parser

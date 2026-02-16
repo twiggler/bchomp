@@ -90,7 +90,7 @@ class CStructStream(io.BufferedIOBase):
         return False
 
 
-def from_cstruct[T](c_parser: Callable[[io.BufferedIOBase], T]) -> p.Parser[T]:
+def from_cstruct[T](c_parser: Callable[[io.BufferedIOBase], T]) -> p.BlockingParser[T]:
     """Create a `bchomp` parser from a cstruct-style reader.
 
     The returned parser will present a small file-like wrapper backed
@@ -100,7 +100,7 @@ def from_cstruct[T](c_parser: Callable[[io.BufferedIOBase], T]) -> p.Parser[T]:
     cstruct reader consumed.
     """
 
-    def _parser(state: p.ParserState) -> p.Result[T]:
+    def _parser(state: p.ParserState) -> p.BlockingResult[T]:
         start = state.pos
         readable = state.readable
         total_len = len(state)
