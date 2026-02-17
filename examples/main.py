@@ -1,7 +1,6 @@
 """A simple SQLite database parser."""
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
 
 import bchomp.parser as p
 from bchomp.adapters.cstruct import from_cstruct
@@ -11,12 +10,9 @@ from examples.sqlite import (
     read_parse_table_leaf_pages,
 )
 
-if TYPE_CHECKING:
-    from collections.abc import Generator
-
 
 @p.do
-def parse_schema_table() -> Generator[p.Parser, Any]:
+def parse_schema_table() -> p.Script:
     """Traverse the B-Tree of a SQLite database.
 
     Returns:
@@ -43,8 +39,8 @@ def parse_schema_table() -> Generator[p.Parser, Any]:
     return leaf_pages
 
 
-def print_schema_results(leaf_page: LeafPage) -> None:
-    """Iterate through parsed leaf pages and prints their contents."""
+def dump_leaf_page(leaf_page: LeafPage) -> None:
+    """Print the contents of a parsed leaf page from the SQLite schema table."""
     print(f"Found leaf page with header: {leaf_page.header}")
 
     # The cells are lazy, so accessing them will trigger parsing.
@@ -73,7 +69,7 @@ def main() -> None:
         # The pages are streamed and the cell contents are lazily parsed.
         pages_iter = p.stream(parse_schema_table(), reader)
         for page in pages_iter:
-            print_schema_results(page)
+            dump_leaf_page(page)
 
 
 if __name__ == "__main__":

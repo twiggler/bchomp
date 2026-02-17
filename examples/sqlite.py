@@ -102,17 +102,17 @@ def read_serial_type() -> Generator[p.BlockingParser, Any, SerialKind]:
     length: even values => BLOB, odd values => TEXT.
     """
     v = yield read_varint
-    if v >= SerialType.BLOB:
-        if v % 2 == 0:
-            return Blob((v - 12) // 2)
-        else:
-            return Text((v - 13) // 2)
-
-    try:
-        return SerialType(v)
-    except ValueError:
-        yield p.failure(f"Unknown serial type: {v}")
-        return  # type: ignore[return-value]
+    match v:
+        case x if x >= SerialType.BLOB and x % 2 == 0:
+            return Blob((x - SerialType.BLOB) // 2)
+        case x if x >= SerialType.TEXT:
+            return Text((x - SerialType.TEXT) // 2)
+        case x:
+            try:
+                return SerialType(x)
+            except ValueError as exc:
+                msg = f"Unknown serial type: {x}"
+                raise p.ParseError(msg) from exc
 
 
 @dataclass
@@ -173,7 +173,7 @@ def read_cell_pointer_array(cell_count: int) -> p.BlockingParser[list[int]]:
 
 
 @p.do
-def read_record_header() -> Generator[p.BlockingParser, Any, tuple[int, list[SerialKind]]]:
+def read_record_header() -> p.BlockingScript[tuple[int, list[SerialKind]]]:
     """Parse the record header using do-notation for clarity.
 
     Returns:
@@ -192,7 +192,7 @@ def read_record_header() -> Generator[p.BlockingParser, Any, tuple[int, list[Ser
 
 
 @p.do
-def read_record(payload_size: int) -> Generator[p.BlockingParser, Any, Record]:
+def read_record(payload_size: int) -> p.BlockingScript[Record]:
     """Parse a record of a given size."""
     header_size, header_content = yield read_record_header()
 
@@ -205,7 +205,7 @@ def read_record(payload_size: int) -> Generator[p.BlockingParser, Any, Record]:
 
 
 @p.do
-def read_table_interior_cell() -> Generator[p.BlockingParser, Any, int]:
+def read_table_interior_cell() -> p.BlockingScript[int]:
     """Parse a table interior cell to find the left-child pointer.
 
     An interior cell format is:
@@ -220,7 +220,7 @@ def read_table_interior_cell() -> Generator[p.BlockingParser, Any, int]:
 
 
 @p.do
-def read_table_leaf_cell() -> Generator[p.BlockingParser, Any, TableLeafCell]:
+def read_table_leaf_cell() -> p.BlockingScript[TableLeafCell]:
     """Parse a table leaf cell."""
     payload_size = yield read_varint
     row_id = yield read_varint
@@ -309,9 +309,7 @@ def read_parse_table_leaf_pages(
 
 @p.relocatable
 @p.do
-def read_interior_page_child_pointers(
-    offset: int,
-) -> Generator[p.BlockingParser, Any, list[int]]:
+def read_interior_page_child_pointers(offset: int) -> p.BlockingScript[list[int]]:
     """Parse an interior page to extract all child page pointers."""
     header = yield read_interior_page_header
 
@@ -334,13 +332,13 @@ def read_interior_page_child_pointers(
 def read_leaf_page(
     offset: int,
     page_size: int,
-) -> Generator[p.BlockingParser, Any, LeafPage]:
+) -> p.BlockingScript[LeafPage]:
     """Parse a leaf page, returning a `LeafPage` object with lazy-evaluated cells."""
 
     @p.do
     def parse_leaf_page_cells(
         cell_count: int,
-    ) -> Generator[p.BlockingParser, Any, list[TableLeafCell]]:
+    ) -> p.BlockingScript[list[TableLeafCell]]:
         cell_pointers = yield read_cell_pointer_array(cell_count)
 
         cells = []

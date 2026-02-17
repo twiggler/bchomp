@@ -498,14 +498,23 @@ def create_parser_from_dataclass(dc: type) -> BlockingParser:
     return map_p(lambda results: dc(*results), sequence(*field_parsers))
 
 
-@overload
-def do(
-    fn: Callable[..., Generator[BlockingParser, Any, T_co]],
-) -> Callable[..., BlockingParser[T_co]]: ...
+type BlockingScript[T_co] = Generator[BlockingParser, Any, T_co]
+type Script = Generator[Parser, Any]
+
+
+class ParseError(Exception):
+    """Raised inside a @do block to signal immediate failure.
+
+    This avoids the need to 'return' after a failure.
+    """
 
 
 @overload
-def do(fn: Callable[..., Generator[Parser, Any]]) -> Callable[..., Parser]: ...
+def do(fn: Callable[..., BlockingScript[T_co]]) -> Callable[..., BlockingParser[T_co]]: ...
+
+
+@overload
+def do(fn: Callable[..., Script]) -> Callable[..., Parser]: ...
 
 
 def do(fn) -> Callable[..., Parser]:
@@ -537,6 +546,9 @@ def do(fn) -> Callable[..., Parser]:
                 except StopIteration as e:
                     # The generator has finished, its return value is the final result.
                     return Success(e.value, state)
+                except ParseError as e:
+                    # A ParseError signals an immediate failure with a custom message.
+                    return Failure(str(e), state)
 
             return step(gen, state)
 
@@ -558,7 +570,7 @@ def emit[Y_co](value: Y_co) -> StreamingParser[Y_co]:
 
 
 @do
-def with_bytes_read[T](parser: BlockingParser[T]) -> Generator[BlockingParser, Any, tuple[T, int]]:
+def with_bytes_read[T](parser: BlockingParser[T]) -> BlockingScript[tuple[T, int]]:
     """Return the result of a parser and the number of bytes it consumed."""
     start_pos = yield position()
     result = yield parser
@@ -596,9 +608,7 @@ def float_be(n: int) -> BlockingParser[float]:
 
 
 @do
-def enum[E: IntEnum](
-    p_int: BlockingParser[int], enum_type: type[E]
-) -> Generator[BlockingParser, Any, E]:
+def enum[E: IntEnum](p_int: BlockingParser[int], enum_type: type[E]) -> BlockingScript[E]:
     """Parse an int and convert it to `enum_type`.
 
     On invalid values, yield a failing parser so the overall parser
@@ -607,6 +617,6 @@ def enum[E: IntEnum](
     val = yield p_int
     try:
         return enum_type(val)
-    except ValueError:
-        yield failure(f"Invalid {enum_type.__name__} value: {val}")
-        return  # type: ignore[return-value]
+    except ValueError as exc:
+        msg = f"Invalid {enum_type.__name__} value: {val}"
+        raise ParseError(msg) from exc

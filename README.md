@@ -42,7 +42,8 @@ The SQLite file parser at `examples/sqlite.py` is included as an example that de
    ```
 
 ## Roadmap
-- **Backtracking research (needed):** Investigate backtracking strategies and how to support safe, efficient backtracking with streaming parsers — e.g. state snapshots vs. checkpointing, interplay with `Suspend`/resume and trampolines, and typing/performance trade-offs.
+- **Backtracking research (needed):** Investigate backtracking strategies and how to support safe, efficient backtracking with streaming parsers — e.g. state snapshots vs. checkpointing, interplay with `Suspend`/resume and trampolines, and typing/performance trade-offs. It might also be that backtracking is less pervasive in binary parsing since it typically relies on Tag-Length-Value encoding schemes.`
+
 
 ## Quickstart
 
