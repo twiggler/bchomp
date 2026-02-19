@@ -6,10 +6,15 @@ from functools import reduce
 from typing import TYPE_CHECKING, Annotated, Any, Protocol
 
 import bchomp.parser as p
+import bchomp.transformers as t
 from bchomp.adapters.lazy import lazy, make_lazy
+from bchomp.compose import compose
 
 if TYPE_CHECKING:
     from collections.abc import Generator
+
+
+HEADER_SIZE = 100
 
 
 class PageType(IntEnum):
@@ -288,28 +293,33 @@ def read_parse_table_leaf_pages(
         current_page_num: int,
     ) -> Generator[p.Parser, Any]:
         page_start = (current_page_num - 1) * page_size
-        offset = 100 if current_page_num == 1 else 0
-        yield p.seek(page_start + offset)
+        yield p.seek(page_start)
+        offset = HEADER_SIZE if current_page_num == 1 else 0
 
-        page_type = yield p.peek(parse_page_type)
-
+        page_type = yield compose(parse_page_type, p.with_relocation, p.peek, t.at(offset))
         if page_type == PageType.TABLE_LEAF:
             # This is a table leaf page, parse it and return.
-            leaf_page = yield read_leaf_page(offset, page_size)
+            leaf_page = yield compose(
+                read_leaf_page(page_size), p.with_relocation, t.take(page_size), t.at(offset)
+            )
             yield p.emit(leaf_page)
 
         elif page_type == PageType.TABLE_INTERIOR:
             # This is a table interior page. Get the child pointers to recurse.
-            child_page_pointers = yield read_interior_page_child_pointers(offset)
+            child_page_pointers = yield compose(
+                read_interior_page_child_pointers(),
+                p.with_relocation,
+                t.take(page_size),
+                t.at(offset),
+            )
             for child_page_num in child_page_pointers:
                 yield _traverse(child_page_num)
 
     return _traverse(page_num)
 
 
-@p.relocatable
 @p.do
-def read_interior_page_child_pointers(offset: int) -> p.BlockingScript[list[int]]:
+def read_interior_page_child_pointers() -> p.BlockingScript[list[int]]:
     """Parse an interior page to extract all child page pointers."""
     header = yield read_interior_page_header
 
@@ -317,7 +327,7 @@ def read_interior_page_child_pointers(offset: int) -> p.BlockingScript[list[int]
 
     child_pages = []
     for cell_ptr_offset in cell_pointers:
-        yield p.seek(cell_ptr_offset - offset)
+        yield p.seek(cell_ptr_offset)
         child_page_num = yield read_table_interior_cell()
         child_pages.append(child_page_num)
 
@@ -327,10 +337,8 @@ def read_interior_page_child_pointers(offset: int) -> p.BlockingScript[list[int]
     return child_pages
 
 
-@p.relocatable
 @p.do
 def read_leaf_page(
-    offset: int,
     page_size: int,
 ) -> p.BlockingScript[LeafPage]:
     """Parse a leaf page, returning a `LeafPage` object with lazy-evaluated cells."""
@@ -343,7 +351,7 @@ def read_leaf_page(
 
         cells = []
         for cell_ptr_offset in cell_pointers:
-            yield p.seek(cell_ptr_offset - offset)
+            yield p.seek(cell_ptr_offset)
             cell = yield read_table_leaf_cell()
             cells.append(cell)
 

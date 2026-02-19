@@ -234,6 +234,20 @@ def bind_p[T, Y, R](p: Parser[T, Y], f: Callable[[T], Parser[R, Y]]) -> Parser[R
     return _bind_p
 
 
+def then_p[T, Y, R](p: Parser[T, Y], q: Parser[R, Y]) -> Parser[R, Y]:
+    """Sequence two parsers, discarding the result of the first.
+
+    This is the parser equivalent of Haskell's ``(>>)``: run ``p`` and
+    then ``q``. If ``p`` fails or suspends, the combined result follows
+    that outcome. On success, the value from ``q`` is returned.
+    """
+
+    def _then(state: ParserState) -> Result[R, Y]:
+        return chain(p(state), lambda success: q(success.state))
+
+    return _then
+
+
 def map_p(fn: Callable[[T_co], U_co], p: BlockingParser[T_co]) -> BlockingParser[U_co]:
     """Map a function over the result of a parser."""
 
@@ -265,6 +279,14 @@ def seek(offset: int) -> BlockingParser[None]:
     return _seek_rel
 
 
+@overload
+def with_relocation(p: BlockingParser[T_co]) -> BlockingParser[T_co]: ...
+
+
+@overload
+def with_relocation(p: Parser[T_co, Y_co]) -> Parser[T_co, Y_co]: ...
+
+
 def with_relocation(p: Parser[T_co, Y_co]) -> Parser[T_co, Y_co]:
     """Create a new local frame of reference for seeking.
 
@@ -291,22 +313,6 @@ def with_relocation(p: Parser[T_co, Y_co]) -> Parser[T_co, Y_co]:
         return chain(result, on_success)
 
     return _relocatable
-
-
-def relocatable(
-    parser_producer: Callable[..., Parser[T_co, Y_co]],
-) -> Callable[..., Parser[T_co, Y_co]]:
-    """Make a parser-producing function create a relocatable parser.
-
-    This automatically wraps the returned parser in `with_relocation`.
-    """
-
-    @wraps(parser_producer)
-    def wrapper(*args: Any, **kwargs: Any) -> Parser[T_co, Y_co]:  # noqa: ANN401
-        parser = parser_producer(*args, **kwargs)
-        return with_relocation(parser)
-
-    return wrapper
 
 
 def satisfy(predicate: Callable[[int], bool]) -> BlockingParser[int]:
@@ -452,9 +458,9 @@ def take(n: int, p: Parser[T_co, Y_co]) -> Parser[T_co, Y_co]: ...
 def take(n, p) -> Parser[T_co, Y_co]:
     """Create a parser that runs another parser within a limited byte context.
 
-    This combinator is implemented by creating a sub-parser that is first
-    anchored, then reads `n` bytes, and runs `p` on that isolated block.
-    This demonstrates how more complex combinators can be built from simpler ones.
+    This combinator is implemented by creating a view of the stream that is limited to
+    the next `n` bytes. The view is not rebased, only bounded.
+    The provided parser `p` is then run on this isolated sub-stream.
     """
 
     def _take_impl(current_state: ParserState) -> Result[T_co, Y_co]:
@@ -499,7 +505,7 @@ def create_parser_from_dataclass(dc: type) -> BlockingParser:
 
 
 type BlockingScript[T_co] = Generator[BlockingParser, Any, T_co]
-type Script = Generator[Parser, Any]
+type Script[T_co] = Generator[Parser[Any, Any], Any, T_co]
 
 
 class ParseError(Exception):
@@ -555,6 +561,19 @@ def do(fn) -> Callable[..., Parser]:
         return _do
 
     return wrapper
+
+
+@overload
+def at(offset: int, parser: BlockingParser[T_co]) -> BlockingParser[T_co]: ...
+
+
+@overload
+def at(offset: int, parser: Parser[T_co, Y_co]) -> Parser[T_co, Y_co]: ...
+
+
+def at(offset, parser) -> Parser[T_co, Y_co]:
+    """Create a parser that runs another parser at a specific offset from the current anchor."""
+    return then_p(seek(offset), parser)
 
 
 def emit[Y_co](value: Y_co) -> StreamingParser[Y_co]:
