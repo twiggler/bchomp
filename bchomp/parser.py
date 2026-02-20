@@ -5,7 +5,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import struct
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Callable, Generator, Iterable, Iterator
 from dataclasses import dataclass, replace
 from enum import IntEnum
 from functools import wraps
@@ -334,7 +334,7 @@ def byte(b: int) -> BlockingParser[int]:
     return satisfy(lambda x: x == b)
 
 
-def sequence(*parsers: BlockingParser) -> BlockingParser[tuple]:
+def sequence(parsers: Iterable) -> BlockingParser[tuple]:
     """Run a sequence of parsers and return their results as a tuple.
 
     Note: This uses a simplified type signature because of a limitation in
@@ -379,7 +379,7 @@ def many[T](p: BlockingParser[T]) -> BlockingParser[list[T]]:
 
 def count[T](n: int, parser: BlockingParser[T]) -> BlockingParser[list[T]]:
     """Run a parser n times and return the results as a list."""
-    return map_p(list, sequence(*([parser] * n)))
+    return map_p(list, sequence([parser] * n))
 
 
 def string(s: str) -> BlockingParser[str]:
@@ -485,6 +485,16 @@ def take(n, p) -> Parser[T_co, Y_co]:
     return _take_impl
 
 
+def gather(offsets: Iterable[int], p: BlockingParser[T_co]) -> BlockingParser[list[T_co]]:
+    """Run a parser `p` at multiple offsets and gather the results in a list.
+
+    This combinator is useful for parsing multiple structures that are located
+    at different positions in the stream, such as entries in a table of contents.
+    """
+    ps = (then_p(seek(offset), p) for offset in offsets)
+    return map_p(list, sequence(ps))
+
+
 def create_parser_from_dataclass(dc: type) -> BlockingParser:
     """Automatically create a parser for a dataclass from Annotated metadata.
 
@@ -501,7 +511,7 @@ def create_parser_from_dataclass(dc: type) -> BlockingParser:
             # The parser is the second argument in our Annotated type
             field_parsers.append(args[1])
 
-    return map_p(lambda results: dc(*results), sequence(*field_parsers))
+    return map_p(lambda results: dc(*results), sequence(field_parsers))
 
 
 type BlockingScript[T_co] = Generator[BlockingParser, Any, T_co]

@@ -6,8 +6,9 @@ import bchomp.parser as p
 from bchomp.adapters.cstruct import from_cstruct
 from examples.c_header import c_header
 from examples.sqlite import (
+    InteriorPage,
     LeafPage,
-    read_parse_table_leaf_pages,
+    read_table,
 )
 
 
@@ -35,7 +36,7 @@ def parse_schema_table() -> p.Script:
     # The schema is on page 1, so we start there.
     yield p.seek(0)
 
-    leaf_pages = yield read_parse_table_leaf_pages(page_num=1, page_size=page_size)
+    leaf_pages = yield read_table(start_page_num=1, page_size=page_size)
     return leaf_pages
 
 
@@ -69,7 +70,8 @@ def main() -> None:
         # The pages are streamed and the cell contents are lazily parsed.
         pages_iter = p.stream(parse_schema_table(), reader)
         for page in pages_iter:
-            dump_leaf_page(page)
+            if not isinstance(page, InteriorPage):
+                dump_leaf_page(page)
 
 
 if __name__ == "__main__":

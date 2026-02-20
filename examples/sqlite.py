@@ -70,56 +70,6 @@ class TableLeafCell:
     payload: Record
 
 
-class LeafPage(Protocol):
-    """A leaf page in a B-Tree, containing a header and cells."""
-
-    header: LeafPageHeader
-    cells: list[TableLeafCell]
-
-
-ColumnValue = int | None | bytes | str | float
-
-
-def read_varint(state: p.ParserState) -> p.BlockingResult[int]:
-    """Parse a variable-length integer (varint)."""
-
-    def process_bytes(parts: tuple[list[int], int]) -> int:
-        head, tail = parts
-        initial_value = reduce(lambda acc, byte: (acc << 7) | (byte & 0x7F), head, 0)
-        return (initial_value << 7) | (tail & 0x7F)
-
-    continuation_byte = p.satisfy(lambda b: (b & 0x80) != 0)
-    final_byte = p.satisfy(lambda b: (b & 0x80) == 0)
-    parser = p.sequence(p.many(continuation_byte), final_byte)
-
-    # TODO: check case where 9 bytes are read
-    return p.map_p(process_bytes, parser)(state)
-
-
-parse_page_type = p.enum(p.uint8, PageType)
-
-
-@p.do
-def read_serial_type() -> Generator[p.BlockingParser, Any, SerialKind]:
-    """Parse a varint and return either a `SerialType`, `Blob`, or `Text`.
-
-    For serial-type values >= 12, the value encodes a BLOB or TEXT with a
-    length: even values => BLOB, odd values => TEXT.
-    """
-    v = yield read_varint
-    match v:
-        case x if x >= SerialType.BLOB and x % 2 == 0:
-            return Blob((x - SerialType.BLOB) // 2)
-        case x if x >= SerialType.TEXT:
-            return Text((x - SerialType.TEXT) // 2)
-        case x:
-            try:
-                return SerialType(x)
-            except ValueError as exc:
-                msg = f"Unknown serial type: {x}"
-                raise p.ParseError(msg) from exc
-
-
 @dataclass
 class PageHeaderBase:
     """The base header for a B-Tree page, common to all page types.
@@ -149,6 +99,121 @@ class InteriorPageHeader(PageHeaderBase):
 
 
 LeafPageHeader = PageHeaderBase
+
+
+@dataclass
+class InteriorPage:
+    """An interior page in a B-Tree, containing a header and child page pointers."""
+
+    header: InteriorPageHeader
+    child_page_numbers: list[int]
+
+
+class LeafPage(Protocol):
+    """A leaf page in a B-Tree, containing a header and cells."""
+
+    header: LeafPageHeader
+    cells: list[TableLeafCell]
+
+
+@p.do
+def read_interior_page() -> p.BlockingScript[InteriorPage]:
+    """Parse an interior page, returning an `InteriorPage` object with child page numbers."""
+    header: InteriorPageHeader = yield read_interior_page_header
+    cell_pointers = yield read_cell_pointer_array(header.cell_count)
+    child_pages = yield p.gather(cell_pointers, read_table_interior_cell())
+    return InteriorPage(header, child_pages)
+
+
+@p.do
+def read_leaf_page(
+    page_size: int,
+) -> p.BlockingScript[LeafPage]:
+    """Parse a leaf page, returning a `LeafPage` object with lazy-evaluated cells."""
+
+    @p.do
+    def parse_leaf_page_cells(
+        cell_count: int,
+    ) -> p.BlockingScript[list[TableLeafCell]]:
+        cell_pointers = yield read_cell_pointer_array(cell_count)
+        cells = yield p.gather(cell_pointers, read_table_leaf_cell())
+        return cells
+
+    header, header_size = yield p.with_bytes_read(read_leaf_page_header)
+
+    # TODO: Distracting, move lazyness out using parser kit
+    lazy_leaf_page = make_lazy(LeafPage, lazy_fields=["cells"])
+    lazy_cells = yield lazy(
+        page_size - header_size,
+        lambda _: parse_leaf_page_cells(header.cell_count),
+    )
+
+    return lazy_leaf_page(header=header, cells=lazy_cells)
+
+
+@p.do
+def read_page(page_num: int, page_size: int) -> p.BlockingScript[InteriorPage | LeafPage]:
+    """Parse a B-Tree page at a given index (1-based)."""
+    page_start = (page_num - 1) * page_size
+    yield p.seek(page_start)
+    offset = HEADER_SIZE if page_num == 1 else 0
+
+    # Shift parser if this is the first page, to skip the database header.
+    page_type = yield compose(parse_page_type, p.with_relocation, p.peek, t.at(offset))
+    match page_type:
+        case PageType.TABLE_LEAF:
+            page_parser = read_leaf_page(page_size)
+        case PageType.TABLE_INTERIOR:
+            page_parser = read_interior_page()
+        case _:
+            msg = f"Unsupported page type: {page_type}"
+            raise p.ParseError(msg)
+
+    page = yield compose(page_parser, p.with_relocation, t.take(page_size), t.at(offset))
+    return page
+
+
+ColumnValue = int | None | bytes | str | float
+
+
+def read_varint(state: p.ParserState) -> p.BlockingResult[int]:
+    """Parse a variable-length integer (varint)."""
+
+    def process_bytes(parts: tuple[list[int], int]) -> int:
+        head, tail = parts
+        initial_value = reduce(lambda acc, byte: (acc << 7) | (byte & 0x7F), head, 0)
+        return (initial_value << 7) | (tail & 0x7F)
+
+    continuation_byte = p.satisfy(lambda b: (b & 0x80) != 0)
+    final_byte = p.satisfy(lambda b: (b & 0x80) == 0)
+    parser = p.sequence((p.many(continuation_byte), final_byte))
+
+    # TODO: check case where 9 bytes are read
+    return p.map_p(process_bytes, parser)(state)
+
+
+parse_page_type = p.enum(p.uint8, PageType)
+
+
+@p.do
+def read_serial_type() -> Generator[p.BlockingParser, Any, SerialKind]:
+    """Parse a varint and return either a `SerialType`, `Blob`, or `Text`.
+
+    For serial-type values >= 12, the value encodes a BLOB or TEXT with a
+    length: even values => BLOB, odd values => TEXT.
+    """
+    v = yield read_varint
+    match v:
+        case x if x >= SerialType.BLOB and x % 2 == 0:
+            return Blob((x - SerialType.BLOB) // 2)
+        case x if x >= SerialType.TEXT:
+            return Text((x - SerialType.TEXT) // 2)
+        case x:
+            try:
+                return SerialType(x)
+            except ValueError as exc:
+                msg = f"Unknown serial type: {x}"
+                raise p.ParseError(msg) from exc
 
 
 read_interior_page_header: p.BlockingParser[InteriorPageHeader] = p.create_parser_from_dataclass(
@@ -279,90 +344,19 @@ def read_parse_record_body(
     serial-kind.
     """
     parsers = [read_column_value(st) for st in serial_types]
-    return p.sequence(*parsers)
+    return p.sequence(parsers)
 
 
-def read_parse_table_leaf_pages(
-    page_num: int,
-    page_size: int,
-) -> p.StreamingParser[LeafPage]:
+def read_table(start_page_num: int, page_size: int) -> p.StreamingParser[LeafPage]:
     """Recursively traverse a B-Tree and return a list of all parsed leaf pages."""
 
     @p.do
-    def _traverse(
-        current_page_num: int,
-    ) -> Generator[p.Parser, Any]:
-        page_start = (current_page_num - 1) * page_size
-        yield p.seek(page_start)
-        offset = HEADER_SIZE if current_page_num == 1 else 0
-
-        page_type = yield compose(parse_page_type, p.with_relocation, p.peek, t.at(offset))
-        if page_type == PageType.TABLE_LEAF:
-            # This is a table leaf page, parse it and return.
-            leaf_page = yield compose(
-                read_leaf_page(page_size), p.with_relocation, t.take(page_size), t.at(offset)
-            )
-            yield p.emit(leaf_page)
-
-        elif page_type == PageType.TABLE_INTERIOR:
-            # This is a table interior page. Get the child pointers to recurse.
-            child_page_pointers = yield compose(
-                read_interior_page_child_pointers(),
-                p.with_relocation,
-                t.take(page_size),
-                t.at(offset),
-            )
-            for child_page_num in child_page_pointers:
+    def _traverse(current_page_num: int) -> p.Script:
+        page = yield read_page(current_page_num, page_size)
+        yield p.emit(page)
+        if isinstance(page, InteriorPage):
+            for child_page_num in page.child_page_numbers:
                 yield _traverse(child_page_num)
+            yield _traverse(page.header.right_most_pointer)
 
-    return _traverse(page_num)
-
-
-@p.do
-def read_interior_page_child_pointers() -> p.BlockingScript[list[int]]:
-    """Parse an interior page to extract all child page pointers."""
-    header = yield read_interior_page_header
-
-    cell_pointers = yield read_cell_pointer_array(header.cell_count)
-
-    child_pages = []
-    for cell_ptr_offset in cell_pointers:
-        yield p.seek(cell_ptr_offset)
-        child_page_num = yield read_table_interior_cell()
-        child_pages.append(child_page_num)
-
-    # For interior pages, we also need to include the right-most pointer.
-    child_pages.append(header.right_most_pointer)
-
-    return child_pages
-
-
-@p.do
-def read_leaf_page(
-    page_size: int,
-) -> p.BlockingScript[LeafPage]:
-    """Parse a leaf page, returning a `LeafPage` object with lazy-evaluated cells."""
-
-    @p.do
-    def parse_leaf_page_cells(
-        cell_count: int,
-    ) -> p.BlockingScript[list[TableLeafCell]]:
-        cell_pointers = yield read_cell_pointer_array(cell_count)
-
-        cells = []
-        for cell_ptr_offset in cell_pointers:
-            yield p.seek(cell_ptr_offset)
-            cell = yield read_table_leaf_cell()
-            cells.append(cell)
-
-        return cells
-
-    header, header_size = yield p.with_bytes_read(read_leaf_page_header)
-
-    lazy_leaf_page = make_lazy(LeafPage, lazy_fields=["cells"])
-    lazy_cells = yield lazy(
-        page_size - header_size,
-        lambda _: parse_leaf_page_cells(header.cell_count),
-    )
-
-    return lazy_leaf_page(header=header, cells=lazy_cells)
+    return _traverse(start_page_num)
