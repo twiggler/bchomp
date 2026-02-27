@@ -33,11 +33,8 @@ def parse_schema_table() -> p.Script:
     if header.schema_format_number != 1:
         yield p.failure(f"Unsupported schema format number: {header.schema_format_number}")
 
-    # The schema is on page 1, so we start there.
-    yield p.seek(0)
-
-    leaf_pages = yield read_table(start_page_num=1, page_size=page_size)
-    return leaf_pages
+    # read_table streams pages
+    yield read_table(start_page_num=1, page_size=page_size)
 
 
 def dump_leaf_page(leaf_page: LeafPage) -> None:

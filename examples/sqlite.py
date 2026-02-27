@@ -116,6 +116,9 @@ class LeafPage(Protocol):
     cells: list[TableLeafCell]
 
 
+Page = InteriorPage | LeafPage
+
+
 @p.do
 def read_interior_page() -> p.BlockingScript[InteriorPage]:
     """Parse an interior page, returning an `InteriorPage` object with child page numbers."""
@@ -152,7 +155,7 @@ def read_leaf_page(
 
 
 @p.do
-def read_page(page_num: int, page_size: int) -> p.BlockingScript[InteriorPage | LeafPage]:
+def read_page(page_num: int, page_size: int) -> p.BlockingScript[Page]:
     """Parse a B-Tree page at a given index (1-based)."""
     page_start = (page_num - 1) * page_size
     yield p.seek(page_start)
@@ -347,12 +350,12 @@ def read_parse_record_body(
     return p.sequence(parsers)
 
 
-def read_table(start_page_num: int, page_size: int) -> p.StreamingParser[LeafPage]:
-    """Recursively traverse a B-Tree and return a list of all parsed leaf pages."""
+def read_table(start_page_num: int, page_size: int) -> p.StreamingParser[Page]:
+    """Recursively traverse the B-Tree and stream all pages reachable from the given start page."""
 
     @p.do
     def _traverse(current_page_num: int) -> p.Script:
-        page = yield read_page(current_page_num, page_size)
+        page: Page = yield read_page(current_page_num, page_size)
         yield p.emit(page)
         if isinstance(page, InteriorPage):
             for child_page_num in page.child_page_numbers:
