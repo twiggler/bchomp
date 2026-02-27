@@ -4,6 +4,11 @@ version = "0.1.0"
 description = "bchomp — a small binary parser-combinator library for Python"
 requires-python = ">=3.14"
 
+[project.optional-dependencies]
+examples = ["dissect.database>=1.1,<2"]
+adapters = ["dissect.cstruct>=4.7,<5"]
+dev = ["ruff>=0.15.3,<1"]
+
 [build-system]
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"

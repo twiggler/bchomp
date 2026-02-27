@@ -55,9 +55,12 @@ First, ensure you have Python 3.14+ installed.
     source .venv/bin/activate
     ```
 
-2.  **Run the parser:**
-    The main entrypoint is located at `examples/main.py` and reads the example database at `examples/data/chinook.db`. Run it as a module so imports resolve correctly:
+2.  **Run the example:**
+    Install the example dependencies and run the SQLite example. The main entrypoint is located at `examples/main.py` and reads the example database at `examples/data/chinook.db`. Run it as a module so imports resolve correctly:
+
     ```bash
+    # activate your virtualenv first (see step 1)
+    pip install -e ".[examples]"    # installs dissect.database (example-only deps)
     python3 -m examples.main
     ```
 
@@ -66,3 +69,29 @@ First, ensure you have Python 3.14+ installed.
 - `bchomp/parser.py`: The core parser-combinator library.
 - `examples/sqlite.py` and `examples/main.py`: The SQLite grammar example that uses `bchomp`.
 - `bchomp/adapters/cstruct.py`: Adapter that converts cstruct readers into `bchomp` parsers (`from_cstruct`).
+
+## Optional dependencies
+
+Some functionality is optional and provided via extras in `pyproject.toml`:
+
+- `examples` — required to run the SQLite example (depends on `dissect.database>=1.1`).
+- `adapters` — required to use the cstruct adapter (depends on `dissect.cstruct>=4.7`).
+- `dev` — developer tools such as `ruff` (pinned to `>=0.15.3`).
+
+Install only what you need into your virtual environment:
+
+```bash
+# Example-only dependencies (run the example):
+pip install -e ".[examples]"
+
+# Adapter-only dependencies (use the cstruct adapter):
+pip install -e ".[adapters]"
+
+# Developer tools (linters/formatters):
+pip install -e ".[dev]"
+
+# Or install everything:
+pip install -e ".[examples,adapters,dev]"
+```
+
+If you plan to run the example or use the adapter, make sure your environment uses Python 3.14+.
