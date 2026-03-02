@@ -4,7 +4,6 @@ from pathlib import Path
 
 import bchomp.parser as p
 from examples.sqlite import (
-    InteriorPage,
     LeafPage,
     SQLite,
 )
@@ -37,7 +36,7 @@ def main() -> None:
     with db_path.open("rb") as f:
         database = SQLite(p.BinaryIOReader(f))
         for page in database.read_table(start_page_num=1):
-            if not isinstance(page, InteriorPage):
+            if isinstance(page, LeafPage):
                 dump_leaf_page(page)
 
 

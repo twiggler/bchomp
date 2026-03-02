@@ -1,6 +1,6 @@
 """Lazy evaluation combinators and wrappers for bchomp parsing."""
 
-from typing import TYPE_CHECKING, Any, get_type_hints
+from typing import TYPE_CHECKING, Any
 
 import bchomp.parser as p
 
@@ -64,51 +64,3 @@ def lazy[T](
     # Return a Lazy object containing the thunk. The main stream has already
     # been advanced by `take`.
     return Lazy(lazy_thunk)
-
-
-def make_lazy(proto: type, lazy_fields: list[str]) -> type:
-    """Dynamically creates a plain class that implements a protocol lazily.
-
-    Resolves the protocol's annotated fields with ``get_type_hints`` so
-    forward-references are handled correctly at runtime.
-    """
-    hints = get_type_hints(proto, include_extras=False)
-
-    all_fields = list(hints.keys())
-
-    def _init(self: object, **kwargs: dict[str, Any]) -> None:
-        """Initialize the object, mapping public lazy field names."""
-        for key, value in kwargs.items():
-            if key in lazy_fields:
-                # Store the Lazy object in the internal attribute.
-                setattr(self, f"_{key}_lazy", value)
-            else:
-                # Set regular attributes directly.
-                setattr(self, key, value)
-
-    # Add a __repr__ for better debugging output.
-    def _repr(self: object) -> str:
-        parts = []
-        for name in all_fields:
-            if name in lazy_fields:
-                val = getattr(self, f"_{name}_lazy")
-                parts.append(f"{name}={val!r}")
-            else:
-                val = getattr(self, name)
-                parts.append(f"{name}={val!r}")
-        return f"Lazy{proto.__name__}({', '.join(parts)})"
-
-    # Create a dictionary of attributes for the new class, starting with __init__ and __repr__.
-    attrs: dict[str, Any] = {"__init__": _init, "__repr__": _repr}
-
-    # For each lazy field, create a property that evaluates the lazy value on access.
-    for field in lazy_fields:
-        internal_name = f"_{field}_lazy"
-
-        # The property uses the `.value` attribute of our `Lazy` class,
-        # which already handles the caching internally.
-        attrs[field] = property(lambda self, name=internal_name: getattr(self, name).value)
-
-    # Create the new class dynamically using type().
-    new_class_name = f"Lazy{proto.__name__}"
-    return type(new_class_name, (), attrs)

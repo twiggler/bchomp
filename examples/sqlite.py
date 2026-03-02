@@ -3,11 +3,11 @@
 from dataclasses import dataclass
 from enum import IntEnum
 from functools import reduce
-from typing import TYPE_CHECKING, Annotated, Any, Protocol
+from typing import TYPE_CHECKING, Annotated, Any
 
 import bchomp.parser as p
 import bchomp.transformers as t
-from bchomp.adapters.lazy import lazy, make_lazy
+from bchomp.adapters.lazy import Lazy, lazy
 from bchomp.compose import compose
 
 if TYPE_CHECKING:
@@ -132,11 +132,17 @@ class InteriorPage:
     child_page_numbers: list[int]
 
 
-class LeafPage(Protocol):
+@dataclass
+class LeafPage:
     """A leaf page in a B-Tree, containing a header and cells."""
 
     header: LeafPageHeader
-    cells: list[TableLeafCell]
+    _lazy_cells: Lazy[list[TableLeafCell]]
+
+    @property
+    def cells(self) -> list[TableLeafCell]:
+        """Access the cells of the leaf page, triggering lazy parsing if necessary."""
+        return self._lazy_cells.value
 
 
 Page = InteriorPage | LeafPage
@@ -174,15 +180,12 @@ def read_leaf_page(
         return cells
 
     header, header_size = yield p.with_bytes_read(read_leaf_page_header)
-
-    # TODO: Distracting, move lazyness out using parser kit
-    lazy_leaf_page = make_lazy(LeafPage, lazy_fields=["cells"])
     lazy_cells = yield lazy(
         page_size - header_size,
         lambda _: parse_leaf_page_cells(header.cell_count),
     )
 
-    return lazy_leaf_page(header=header, cells=lazy_cells)
+    return LeafPage(header=header, _lazy_cells=lazy_cells)
 
 
 @p.do
@@ -203,6 +206,8 @@ def read_page(page_num: int, page_size: int) -> p.BlockingScript[Page]:
             msg = f"Unsupported page type: {page_type}"
             raise p.ParseError(msg)
 
+    # TODO: this is a fantasy because leaf page cells are not necessarity contiguous
+    # idea: parse cell descriptors and project using FragmentedReader into cell parser
     page = yield compose(page_parser, p.with_relocation, t.take(page_size), t.at(offset))
     return page
 
@@ -344,7 +349,7 @@ def read_column_value(st: SerialKind) -> p.BlockingParser[ColumnValue]:  # noqa:
         case Text(size=size):
             return p.map_p(lambda b: b.decode(), p.bytes_n(size))
         case SerialType.NULL:
-            return p.map_p(lambda _: None, p.bytes_n(0))
+            return p.pure(None)
         case SerialType.INT8:
             return p.int8
         case SerialType.INT16:

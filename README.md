@@ -17,7 +17,6 @@ The SQLite file parser at `examples/sqlite.py` is included as an example that de
 
 - **Parser-Combinator Library (`bchomp/parser.py`):** Core of the project — a small, functional toolkit of primitives and combinators (e.g., `sequence`, `many`, `map_p`, `satisfy`) and helpers for working with stream positions (`seek`, `position`). There is also support for streaming parsers (`StreamingParser`/`emit`) that can produce values incrementally while parsing. 
 - **Lazy Evaluation:** Built-in `lazy`/deferred parsers allow expensive decoding to be postponed until the value is actually needed, enabling fast initial scans of large files.
-     Note: laziness is implemented by automatically creating lazily-wrapped classes via `make_lazy` that preserve the protocol-based interface. This decouples deferred evaluation from the public API so callers normally don't need to access `.value` directly — evaluation is interface-preserving and happens transparently.
 - **Relocatable Parsers:** Support for the `with_relocation`combinator makes parsers composable without relying on global file offsets.
 - **cstruct compatibility:** An adapter bridges `cstruct`/`dissect.cstruct` readers into `bchomp` parsers so existing zero-copy cstruct readers can be reused (`bchomp/adapters/cstruct.py`).
 
