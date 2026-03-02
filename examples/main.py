@@ -3,38 +3,11 @@
 from pathlib import Path
 
 import bchomp.parser as p
-from bchomp.adapters.cstruct import from_cstruct
-from examples.c_header import c_header
 from examples.sqlite import (
     InteriorPage,
     LeafPage,
-    read_table,
+    SQLite,
 )
-
-
-@p.do
-def parse_schema_table() -> p.Script:
-    """Traverse the B-Tree of a SQLite database.
-
-    Returns:
-        A list of all leaf pages from the master table.
-
-    """
-    # The first 16 bytes of the database file is the magic string
-    yield p.string("SQLite format 3\0")
-    # The next 2 bytes are the page size
-    page_size_val = yield p.uint16_be
-    # A page size of 1 means 65536
-    page_size = page_size_val if page_size_val != 1 else 65536
-
-    # Alternatively, we can use cstruct to parse the header:
-    yield p.seek(0)
-    header = yield from_cstruct(c_header.header)
-    if header.schema_format_number != 1:
-        yield p.failure(f"Unsupported schema format number: {header.schema_format_number}")
-
-    # read_table streams pages
-    yield read_table(start_page_num=1, page_size=page_size)
 
 
 def dump_leaf_page(leaf_page: LeafPage) -> None:
@@ -62,11 +35,8 @@ def main() -> None:
     """Parse the schema of a SQLite database and print the results."""
     db_path = Path(__file__).parent / "data" / "chinook.db"
     with db_path.open("rb") as f:
-        reader = p.BinaryIOReader(f)
-        # Get an iterator over the leaf pages of the schema table.
-        # The pages are streamed and the cell contents are lazily parsed.
-        pages_iter = p.stream(parse_schema_table(), reader)
-        for page in pages_iter:
+        database = SQLite(p.BinaryIOReader(f))
+        for page in database.read_table(start_page_num=1):
             if not isinstance(page, InteriorPage):
                 dump_leaf_page(page)
 

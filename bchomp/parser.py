@@ -153,13 +153,19 @@ type BlockingParser[T_co] = Callable[[ParserState], BlockingResult[T_co]]
 type StreamingParser[Y_co] = Callable[[ParserState], Result[None, Y_co]]
 
 
-def run_parser[T_co](parser: BlockingParser[T_co], data: Readable) -> BlockingResult[T_co]:
+def run_parser[T_co](parser: BlockingParser[T_co], data: Readable) -> T_co:
     """Run a parser on a readable data source."""
     # Initialize with a root anchor at position 0. This allows `seek` to
     # function as an absolute seek from the start of the file when used
     # at the top level.
     state = ParserState(data, anchors=(0,))
-    return parser(state)
+    result = parser(state)
+    match result:
+        case Success(value, _):
+            return value
+        case Failure(message, state):
+            msg = f"Parsing failed: {message} at pos {state.pos}"
+            raise ValueError(msg)
 
 
 def stream(parser: StreamingParser[Y_co], data: Readable) -> Iterator[Y_co]:

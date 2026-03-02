@@ -11,7 +11,7 @@ from bchomp.adapters.lazy import lazy, make_lazy
 from bchomp.compose import compose
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Generator, Iterator
 
 
 HEADER_SIZE = 100
@@ -60,6 +60,29 @@ class Text:
 
 
 SerialKind = SerialType | Blob | Text
+
+
+@dataclass
+class Header:
+    """Minimal representation required for parsing pages."""
+
+    page_size: int
+
+
+class SQLite:
+    """Provide a facade for parsing SQLite database files."""
+
+    _reader: p.Readable
+    header: Header
+
+    def __init__(self, reader: p.Readable) -> None:
+        self._reader = reader
+        self.header = p.run_parser(read_header(), self._reader)
+
+    def read_table(self, start_page_num: int) -> Iterator[Page]:
+        """Return an iterator over all pages reachable from the given start page number."""
+        table_parser = read_table(start_page_num, self.header.page_size)
+        return p.stream(table_parser, self._reader)
 
 
 @dataclass
@@ -117,6 +140,14 @@ class LeafPage(Protocol):
 
 
 Page = InteriorPage | LeafPage
+
+
+@p.do
+def read_header() -> p.BlockingScript[Header]:
+    """Parse minimal SQLite database header."""
+    yield p.string("SQLite format 3\0")
+    page_size = yield p.map_p(lambda v: v if v != 1 else 65536, p.uint16_be)
+    return Header(page_size=page_size)
 
 
 @p.do
