@@ -68,39 +68,131 @@ class BinaryIOReader:
 
 
 class SubReader:
-    """A Readable that presents a limited view (a slice) of another Readable."""
+    """A Readable that presents a rebased, bounded view of another Readable.
+
+    Offsets passed to ``read`` are local (0 = first byte of the sub-region).
+    """
 
     def __init__(self, base_reader: Readable, base_offset: int, length: int) -> None:
         self._base_reader = base_reader
         self._base_offset = base_offset
         self._len = length
-        self._end_offset = base_offset + length
 
     def read(self, n: int, offset: int) -> bytes:
-        """Read from the sub-reader."""
-        if offset < self._base_offset or offset >= self._end_offset:
-            return b""  # Reading outside our slice returns nothing.
-
-        # Clamp the number of bytes to not read past our end.
-        n = min(n, self._end_offset - offset)
-
-        # The read is forwarded to the base reader with the absolute offset.
-        return self._base_reader.read(n, offset)
+        """Read n bytes at local offset (0 = start of the sub-region)."""
+        if offset >= self._len:
+            return b""
+        n = min(n, self._len - offset)
+        return self._base_reader.read(n, self._base_offset + offset)
 
     def __len__(self) -> int:
         return self._len
 
 
 @dataclass(frozen=True)
+class _Chunk:
+    reader: Readable
+    start: int  # absolute start offset of this chunk within the ChainReader
+
+    @property
+    def end_offset(self) -> int:
+        return self.start + len(self.reader)
+
+
+class ChainReader:
+    """A Readable that lazily chains multiple readers into a single contiguous view.
+
+    Chunks are pulled from the supplied iterator on demand as reads advance
+    into them, so the entire sequence never needs to be materialised up front.
+    Once pulled, a chunk is retained in memory to support arbitrary backward seeks.
+    """
+
+    def __init__(self, readers: Iterable[Readable]) -> None:
+        self._iter = iter(readers)
+        self._loaded: list[_Chunk] = []
+        self._total_len: int | None = None
+
+    def _load_up_to(self, offset: int | None = None) -> None:
+        """Pull chunks until *offset* is covered; pass None to exhaust the iterator."""
+        if self._total_len is not None:
+            return
+        if offset is not None and self._loaded and self._loaded[-1].end_offset > offset:
+            return
+        for chunk in self._iter:
+            current_end = self._loaded[-1].end_offset if self._loaded else 0
+            self._loaded.append(_Chunk(chunk, current_end))
+            if offset is not None and self._loaded[-1].end_offset > offset:
+                return
+        self._total_len = self._loaded[-1].end_offset if self._loaded else 0
+
+    def _find_chunk_index(self, offset: int) -> int:
+        """Binary-search for the index of the chunk containing *offset*.
+
+        Returns ``len(self._loaded)`` when *offset* is not covered by any loaded chunk.
+        """
+        if not self._loaded:
+            return 0
+        lo, hi = 0, len(self._loaded) - 1
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            chunk = self._loaded[mid]
+            if offset < chunk.start:
+                hi = mid - 1
+            elif offset >= chunk.end_offset:
+                lo = mid + 1
+            else:
+                return mid
+        return len(self._loaded)
+
+    def read(self, n: int, offset: int) -> bytes:
+        """Read *n* bytes starting at *offset*, spanning chunk boundaries as needed."""
+        if n <= 0:
+            return b""
+        self._load_up_to(offset + n - 1)
+
+        result = bytearray()
+        remaining = n
+        pos = offset
+        i = self._find_chunk_index(pos)
+        while remaining > 0 and i < len(self._loaded):
+            chunk = self._loaded[i]
+            local_offset = pos - chunk.start
+            to_read = min(remaining, chunk.end_offset - pos)
+            part = chunk.reader.read(to_read, local_offset)
+            result.extend(part)
+            remaining -= len(part)
+            pos += len(part)
+            if len(part) < to_read:
+                break  # chunk returned fewer bytes than requested; stop early
+            i += 1
+
+        return bytes(result)
+
+    def __len__(self) -> int:
+        self._load_up_to()
+        return self._total_len  # type: ignore[return-value]
+
+
+@dataclass(frozen=True)
 class ParserState:
-    """The state of the parser."""
+    """The state of the parser.
+
+    Two orthogonal coordinate systems are in play:
+
+    - **Physical** (``Readable`` / ``pos``): ``pos`` is always 0-based into
+      ``state.readable``.  ``take`` creates a ``SubReader`` and resets ``pos=0``,
+      bounding and rebasing the physical space for the inner parser.
+    - **Logical** (``anchors``): ``seek(n)`` resolves to ``anchors[-1] + n``.
+      ``with_relocation`` pushes the current ``pos`` onto anchors; ``absolute``
+      resets anchors to ``(0,)`` for file-absolute seeks.
+    """
 
     readable: Readable
     """The data source to parse."""
     pos: int = 0
     """The current absolute position in the data source."""
     anchors: tuple[int, ...] = ()
-    """A stack of positions for relative seeking."""
+    """Base addresses for relative seeking; ``seek(n)`` resolves to ``anchors[-1] + n``."""
 
     def __len__(self) -> int:
         return len(self.readable)
@@ -153,13 +245,18 @@ type BlockingParser[T_co] = Callable[[ParserState], BlockingResult[T_co]]
 type StreamingParser[Y_co] = Callable[[ParserState], Result[None, Y_co]]
 
 
+def initial_state(data: Readable) -> ParserState:
+    """Create an initial parser state for a readable data source.
+
+    The root anchor is set to position 0, so top-level `seek` calls behave
+    as absolute seeks from the start of the data.
+    """
+    return ParserState(data, anchors=(0,))
+
+
 def run_parser[T_co](parser: BlockingParser[T_co], data: Readable) -> T_co:
     """Run a parser on a readable data source."""
-    # Initialize with a root anchor at position 0. This allows `seek` to
-    # function as an absolute seek from the start of the file when used
-    # at the top level.
-    state = ParserState(data, anchors=(0,))
-    result = parser(state)
+    result = parser(initial_state(data))
     match result:
         case Success(value, _):
             return value
@@ -168,9 +265,8 @@ def run_parser[T_co](parser: BlockingParser[T_co], data: Readable) -> T_co:
             raise ValueError(msg)
 
 
-def stream(parser: StreamingParser[Y_co], data: Readable) -> Iterator[Y_co]:
-    """Run a streaming parser on a readable data source, yielding emitted values."""
-    state = ParserState(data, anchors=(0,))
+def stream_from(parser: StreamingParser[Y_co], state: ParserState) -> Iterator[Y_co]:
+    """Run a streaming parser from a given parser state, yielding emitted values."""
     result = parser(state)
     while isinstance(result, Suspend):
         yield result.value
@@ -178,6 +274,11 @@ def stream(parser: StreamingParser[Y_co], data: Readable) -> Iterator[Y_co]:
     if isinstance(result, Failure):
         msg = f"Parsing failed: {result.message} at pos {result.state.pos}"
         raise ValueError(msg)  # noqa: TRY004
+
+
+def stream(parser: StreamingParser[Y_co], data: Readable) -> Iterator[Y_co]:
+    """Run a streaming parser on a readable data source, yielding emitted values."""
+    return stream_from(parser, initial_state(data))
 
 
 def bytes_n(n: int) -> BlockingParser[bytes]:
@@ -319,6 +420,30 @@ def with_relocation(p: Parser[T_co, Y_co]) -> Parser[T_co, Y_co]:
         return chain(result, on_success)
 
     return _relocatable
+
+
+@overload
+def absolute(p: BlockingParser[T_co]) -> BlockingParser[T_co]: ...
+
+
+@overload
+def absolute(p: Parser[T_co, Y_co]) -> Parser[T_co, Y_co]: ...
+
+
+def absolute(p: Parser[T_co, Y_co]) -> Parser[T_co, Y_co]:
+    """Run a parser with the anchor stack reset to zero, then restore it.
+
+    Any `seek` calls inside `p` will be treated as absolute offsets from the
+    start of the readable, regardless of the current anchor stack. The original
+    anchors are restored after `p` completes.
+    """
+
+    def _absolute(state: ParserState) -> Result[T_co, Y_co]:
+        detached_state = replace(state, anchors=(0,))
+        result = p(detached_state)
+        return chain(result, lambda r: Success(r.value, replace(r.state, anchors=state.anchors)))
+
+    return _absolute
 
 
 def satisfy(predicate: Callable[[int], bool]) -> BlockingParser[int]:
@@ -464,22 +589,21 @@ def take(n: int, p: Parser[T_co, Y_co]) -> Parser[T_co, Y_co]: ...
 def take(n, p) -> Parser[T_co, Y_co]:
     """Create a parser that runs another parser within a limited byte context.
 
-    This combinator is implemented by creating a view of the stream that is limited to
-    the next `n` bytes. The view is not rebased, only bounded.
-    The provided parser `p` is then run on this isolated sub-stream.
+    Creates a ``SubReader`` covering the next ``n`` bytes and runs ``p`` inside
+    it with position and anchors reset to 0, so all seeks within ``p`` are
+    local to the sub-region.  After ``p`` completes, the outer stream is
+    advanced by ``n`` bytes regardless of how far ``p`` read.
     """
 
     def _take_impl(current_state: ParserState) -> Result[T_co, Y_co]:
-        # Get the current stream to calculate the sub-reader's offset and data source.
-        # Create a SubReader for the next `n` bytes.
         sub_reader = SubReader(
             base_reader=current_state.readable,
             base_offset=current_state.pos,
             length=n,
         )
-
-        # The new state uses the SubReader, but `pos` is still absolute.
-        scoped_state = replace(current_state, readable=sub_reader)
+        # Reset pos and anchors to 0 so the parser operates in the sub-reader's
+        # local coordinate space (0 = first byte of the sub-region).
+        scoped_state = replace(current_state, readable=sub_reader, pos=0, anchors=(0,))
 
         return chain(
             p(scoped_state),
@@ -499,6 +623,32 @@ def gather(offsets: Iterable[int], p: BlockingParser[T_co]) -> BlockingParser[li
     """
     ps = (then_p(seek(offset), p) for offset in offsets)
     return map_p(list, sequence(ps))
+
+
+def linearize[T](s: StreamingParser[tuple[int, int]], b: BlockingParser[T]) -> BlockingParser[T]:
+    """Stitch scattered regions of a readable into one contiguous view, then parse it.
+
+    `s` is a streaming parser that yields `(offset, size)` tuples, each
+    describing a contiguous region in the current readable. The regions are
+    lazily mapped to `SubReader`s and joined by a `ChainReader`, producing a
+    single virtual readable. `b` is then run on that virtual readable from
+    position 0.
+
+    The position in the original state is left unchanged (the navigation
+    performed by `s` has no meaningful "next" position to report).
+    """
+
+    def _linearize(state: ParserState) -> BlockingResult[T]:
+        fragments = (
+            SubReader(state.readable, offset, size) for offset, size in stream_from(s, state)
+        )
+        chain_reader = ChainReader(fragments)
+        result = b(initial_state(chain_reader))
+        if isinstance(result, Failure):
+            return result
+        return Success(result.value, state)
+
+    return _linearize
 
 
 def create_parser_from_dataclass(dc: type) -> BlockingParser:

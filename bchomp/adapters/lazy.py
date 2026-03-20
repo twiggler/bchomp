@@ -32,35 +32,21 @@ class Lazy[T]:
 
 
 @p.do
-def lazy[T](
-    size: int, parser: Callable[[int], p.BlockingParser[T]]
-) -> Generator[p.BlockingParser, Any, Lazy[T]]:
-    """Create a lazy-evaluated value by parsing a block of a given size.
+def lazy_unbounded[T](parser: p.BlockingParser[T]) -> Generator[p.BlockingParser, Any, Lazy[T]]:
+    """Create a lazy-evaluated value from the current stream position.
 
-    This combinator is essential for performance. It immediately skips the
-    main stream forward by `size` bytes, while returning a `Lazy` object.
-    The actual parsing of the content block is deferred until the `.value`
-    of the `Lazy` object is accessed for the first time.
-
-    This uses the `take` combinator internally to provide a safe, isolated
-    stream for the deferred parsing.
+    Captures the current parser state and returns a `Lazy` object immediately.
+    The actual parsing is deferred until `.value` is accessed for the first time.
+    This combinator does *not* advance the stream — the caller is responsible
+    for any position management.
     """
-    # `take` will run `get_stream` on an isolated sub-stream of `size` bytes.
-    # The result, `lazy_content_stream`, will be a Stream object whose data
-    # is only the `size` bytes we skipped over.
-
-    lazy_content_stream: p.ParserState = yield p.take(size, p.get_state())
+    lazy_content_state: p.ParserState = yield p.get_state()
 
     def lazy_thunk() -> T:
-        # When the thunk is finally called, it runs the real parser on the
-        # captured, isolated sub-stream.
-        result = parser(size)(lazy_content_stream)
+        result = parser(lazy_content_state)
         if isinstance(result, p.Failure):
-            # If parsing fails, raise an exception to signal the problem.
             msg = f"Failed to parse lazy content: {result.message}"
             raise ValueError(msg)  # noqa: TRY004
         return result.value
 
-    # Return a Lazy object containing the thunk. The main stream has already
-    # been advanced by `take`.
     return Lazy(lazy_thunk)

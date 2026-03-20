@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 import bchomp.parser as p
 import bchomp.transformers as t
-from bchomp.adapters.lazy import Lazy, lazy
+from bchomp.adapters.lazy import Lazy, lazy_unbounded
 from bchomp.compose import compose
 
 if TYPE_CHECKING:
@@ -172,18 +172,15 @@ def read_leaf_page(
     """Parse a leaf page, returning a `LeafPage` object with lazy-evaluated cells."""
 
     @p.do
-    def parse_leaf_page_cells(
+    def read_leaf_page_cells(
         cell_count: int,
     ) -> p.BlockingScript[list[TableLeafCell]]:
         cell_pointers = yield read_cell_pointer_array(cell_count)
-        cells = yield p.gather(cell_pointers, read_table_leaf_cell())
+        cells = yield p.gather(cell_pointers, read_table_leaf_cell(page_size))
         return cells
 
-    header, header_size = yield p.with_bytes_read(read_leaf_page_header)
-    lazy_cells = yield lazy(
-        page_size - header_size,
-        lambda _: parse_leaf_page_cells(header.cell_count),
-    )
+    header: LeafPageHeader = yield read_leaf_page_header
+    lazy_cells = yield lazy_unbounded(read_leaf_page_cells(header.cell_count))
 
     return LeafPage(header=header, _lazy_cells=lazy_cells)
 
@@ -199,16 +196,15 @@ def read_page(page_num: int, page_size: int) -> p.BlockingScript[Page]:
     page_type = yield compose(parse_page_type, p.with_relocation, p.peek, t.at(offset))
     match page_type:
         case PageType.TABLE_LEAF:
-            page_parser = read_leaf_page(page_size)
+            # No take: leaf cells may span overflow pages, so the full database
+            # readable must remain visible inside read_leaf_page.
+            page = yield compose(read_leaf_page(page_size), p.with_relocation, t.at(offset))
         case PageType.TABLE_INTERIOR:
-            page_parser = read_interior_page()
+            page = yield compose(read_interior_page(), t.take(page_size), t.at(offset))
         case _:
             msg = f"Unsupported page type: {page_type}"
             raise p.ParseError(msg)
 
-    # TODO: this is a fantasy because leaf page cells are not necessarity contiguous
-    # idea: parse cell descriptors and project using FragmentedReader into cell parser
-    page = yield compose(page_parser, p.with_relocation, t.take(page_size), t.at(offset))
     return page
 
 
@@ -307,8 +303,7 @@ def read_record(payload_size: int) -> p.BlockingScript[Record]:
 
     body_size = payload_size - header_size
 
-    body_parser = read_parse_record_body(header_content)
-    values = yield p.take(body_size, body_parser)
+    values = yield p.take(body_size, read_record_body(header_content))
 
     return Record(serial_types=header_content, values=values)
 
@@ -329,16 +324,101 @@ def read_table_interior_cell() -> p.BlockingScript[int]:
 
 
 @p.do
-def read_table_leaf_cell() -> p.BlockingScript[TableLeafCell]:
-    """Parse a table leaf cell."""
+def read_fragments(
+    payload_size: int,
+    page_size: int,
+) -> p.Script[None]:
+    """Yield (offset, size) tuples covering the full payload, following overflow pages.
+
+    Obtains the current stream position and computes the local payload size
+    internally.
+    """
+    local_start = yield p.position()
+    local = local_payload_size(payload_size, PageType.TABLE_LEAF, page_size) or payload_size
+    yield p.emit((local_start, local))
+    remaining = payload_size - local
+    if remaining == 0:
+        return
+    yield p.seek(local_start + local)
+    next_page_num = yield p.uint32_be
+    while next_page_num != 0:
+        data_offset = (next_page_num - 1) * page_size + _OVERFLOW_PAGE_HEADER
+        data_size = min(page_size - _OVERFLOW_PAGE_HEADER, remaining)
+        yield p.emit((data_offset, data_size))
+        remaining -= data_size
+        if remaining == 0:
+            break
+        yield p.seek((next_page_num - 1) * page_size)
+        next_page_num = yield p.uint32_be
+
+
+@p.do
+def read_table_leaf_cell(
+    page_size: int,
+) -> p.BlockingScript[TableLeafCell]:
+    """Parse a table leaf cell, following overflow pages when the payload spills."""
     payload_size = yield read_varint
     row_id = yield read_varint
-
-    # The payload of a table leaf cell is a record.
-    # We can parse it directly since we know its size.
-    payload = yield p.take(payload_size, read_record(payload_size))
-
+    payload = yield p.linearize(
+        p.absolute(read_fragments(payload_size, page_size)),
+        read_record(payload_size),
+    )
     return TableLeafCell(rowid=row_id, payload=payload)
+
+
+# Structural overhead constants (SQLite file format spec §2.3.3).
+_OVERFLOW_PAGE_HEADER = 4  # next-page pointer at the start of each overflow page
+_PAGE_HEADER = 8  # b-tree page header bytes
+_MIN_LOCAL_BYTES = 3  # SQLite requires at least 3 bytes stored on the b-tree page
+_CELL_POINTER = 2  # cell-pointer array entry
+_MAX_VARINT = 9  # maximum bytes in a varint
+
+# Bytes subtracted from U before applying the 32/255 or 64/255 fill fraction.
+_PAGE_FORMULA_OVERHEAD = _PAGE_HEADER + _OVERFLOW_PAGE_HEADER  # 12
+
+# Maximum per-cell overhead for a table-leaf (payload + rowid varints,
+# cell pointer, overflow pointer, minimum local bytes).
+_TABLE_LEAF_CELL_OVERHEAD = (
+    _PAGE_HEADER + _CELL_POINTER + 2 * _MAX_VARINT + _OVERFLOW_PAGE_HEADER + _MIN_LOCAL_BYTES
+)  # 35
+
+# Per-cell overhead used in the index / shared min_local formula.
+_INDEX_CELL_OVERHEAD = _CELL_POINTER + 2 * _MAX_VARINT + _MIN_LOCAL_BYTES  # 23
+
+
+def local_payload_size(
+    payload_size: int,
+    page_type: PageType,
+    usable_size: int,
+) -> int | None:
+    """Return the local payload byte count when a cell overflows, or None if no overflow.
+
+    SQLite stores as much payload as possible on the b-tree page and spills
+    the rest to a chain of overflow pages.  The number of bytes kept locally
+    depends on the page type and the usable page size (page size minus the
+    reserved region).
+
+    Returns:
+        None  — the entire payload fits on the page; no overflow pointer follows.
+        int   — number of bytes stored locally; a 4-byte overflow page number
+                immediately follows the local payload.
+
+    """
+    min_local = ((usable_size - _PAGE_FORMULA_OVERHEAD) * 32 // 255) - _INDEX_CELL_OVERHEAD
+    match page_type:
+        case PageType.TABLE_LEAF:
+            max_local = usable_size - _TABLE_LEAF_CELL_OVERHEAD
+        case PageType.INDEX_LEAF | PageType.INDEX_INTERIOR:
+            max_local = ((usable_size - _PAGE_FORMULA_OVERHEAD) * 64 // 255) - _INDEX_CELL_OVERHEAD
+        case _:
+            msg = f"Page type {page_type} does not carry payload"
+            raise ValueError(msg)
+
+    if payload_size <= max_local:
+        return None
+
+    local = min_local + ((payload_size - min_local) % (usable_size - _OVERFLOW_PAGE_HEADER))
+    return min_local if local > max_local else local
 
 
 def read_column_value(st: SerialKind) -> p.BlockingParser[ColumnValue]:  # noqa: C901, PLR0911, PLR0912
@@ -372,7 +452,7 @@ def read_column_value(st: SerialKind) -> p.BlockingParser[ColumnValue]:  # noqa:
             return p.failure(f"Unsupported serial kind: {st}")
 
 
-def read_parse_record_body(
+def read_record_body(
     serial_types: list[SerialKind],
 ) -> p.BlockingParser[tuple[ColumnValue, ...]]:
     """Create a parser for a record's body based on its serial types.
