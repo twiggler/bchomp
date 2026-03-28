@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-import bchomp.parser as p
+from bchomp.reader import BinaryIOReader
 from examples.sqlite import (
     LeafPage,
     SQLite,
@@ -34,7 +34,7 @@ def main() -> None:
     """Parse the schema of a SQLite database and print the results."""
     db_path = Path(__file__).parent / "data" / "chinook.db"
     with db_path.open("rb") as f:
-        database = SQLite(p.BinaryIOReader(f))
+        database = SQLite(BinaryIOReader(f))
         for page in database.read_table(start_page_num=1):
             if isinstance(page, LeafPage):
                 dump_leaf_page(page)

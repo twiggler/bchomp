@@ -4,7 +4,7 @@ import itertools
 import sqlite3
 import string
 
-import bchomp.parser as p
+from bchomp.reader import BytesReader
 from examples.sqlite import LeafPage, SQLite, TableLeafCell
 
 # With page_size=512, max_local = 512 - 35 = 477 bytes.
@@ -25,7 +25,7 @@ def _make_db(*values: str) -> SQLite:
     conn.commit()
     data = bytes(conn.serialize())
     conn.close()
-    return SQLite(p.BytesReader(data))
+    return SQLite(BytesReader(data))
 
 
 def _root_page(db: SQLite, table: str) -> int:
