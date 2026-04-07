@@ -203,7 +203,7 @@ def then_p[T, Y, R](p: Parser[T, Y], q: Parser[R, Y]) -> Parser[R, Y]:
     return _then
 
 
-def map_p(fn: Callable[[T_co], U_co], p: BlockingParser[T_co]) -> BlockingParser[U_co]:
+def map_p(p: BlockingParser[T_co], fn: Callable[[T_co], U_co]) -> BlockingParser[U_co]:
     """Map a function over the result of a parser."""
 
     def _map_p(state: ParserState) -> BlockingResult[U_co]:
@@ -215,7 +215,7 @@ def map_p(fn: Callable[[T_co], U_co], p: BlockingParser[T_co]) -> BlockingParser
     return _map_p
 
 
-any_byte = map_p(lambda b: b[0], bytes_n(1))
+any_byte = map_p(bytes_n(1), lambda b: b[0])
 
 
 def seek(offset: int) -> BlockingParser[None]:
@@ -358,12 +358,12 @@ def many[T](p: BlockingParser[T]) -> BlockingParser[list[T]]:
 
 def count[T](n: int, parser: BlockingParser[T]) -> BlockingParser[list[T]]:
     """Run a parser n times and return the results as a list."""
-    return map_p(list, sequence([parser] * n))
+    return map_p(sequence([parser] * n), list)
 
 
 def string(s: str) -> BlockingParser[str]:
     """Parse a specific string."""
-    return map_p(lambda x: x.decode("utf-8"), bytes_n(len(s.encode("utf-8"))))
+    return map_p(bytes_n(len(s.encode("utf-8"))), lambda x: x.decode("utf-8"))
 
 
 def get_state() -> BlockingParser[ParserState]:
@@ -383,7 +383,7 @@ def position() -> BlockingParser[int]:
 
     This is useful for calculations that depend on the size of a parsed block.
     """
-    return map_p(lambda s: s.pos, get_state())
+    return map_p(get_state(), lambda s: s.pos)
 
 
 def failure(message: str) -> BlockingParser[T_co]:
@@ -470,7 +470,7 @@ def gather(offsets: Iterable[int], p: BlockingParser[T_co]) -> BlockingParser[li
     at different positions in the stream, such as entries in a table of contents.
     """
     ps = (then_p(seek(offset), p) for offset in offsets)
-    return map_p(list, sequence(ps))
+    return map_p(sequence(ps), list)
 
 
 def linearize[T](s: StreamingParser[tuple[int, int]], b: BlockingParser[T]) -> BlockingParser[T]:
@@ -515,7 +515,7 @@ def create_parser_from_dataclass(dc: type) -> BlockingParser:
             # The parser is the second argument in our Annotated type
             field_parsers.append(args[1])
 
-    return map_p(lambda results: dc(*results), sequence(field_parsers))
+    return map_p(sequence(field_parsers), lambda results: dc(*results))
 
 
 type BlockingScript[T_co] = Generator[BlockingParser, Any, T_co]
@@ -614,7 +614,7 @@ def with_bytes_read[T](parser: BlockingParser[T]) -> BlockingScript[tuple[T, int
 
 def uint_be(n: int) -> BlockingParser[int]:
     """Parse a big-endian unsigned integer of `n` bytes."""
-    return map_p(lambda b: int.from_bytes(b, "big", signed=False), bytes_n(n))
+    return map_p(bytes_n(n), lambda b: int.from_bytes(b, "big", signed=False))
 
 
 uint8 = uint_be(1)
@@ -624,7 +624,7 @@ uint32_be = uint_be(4)
 
 def int_be(n: int) -> BlockingParser[int]:
     """Parse a big-endian signed integer of `n` bytes."""
-    return map_p(lambda b: int.from_bytes(b, "big", signed=True), bytes_n(n))
+    return map_p(bytes_n(n), lambda b: int.from_bytes(b, "big", signed=True))
 
 
 int8 = int_be(1)
@@ -637,7 +637,7 @@ int64_be = int_be(8)
 
 def float_be(n: int) -> BlockingParser[float]:
     """Parse a big-endian float of `n` bytes."""
-    return map_p(lambda b: struct.unpack(">d", b)[0], bytes_n(n))
+    return map_p(bytes_n(n), lambda b: struct.unpack(">d", b)[0])
 
 
 @do

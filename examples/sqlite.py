@@ -152,7 +152,7 @@ Page = InteriorPage | LeafPage
 def read_header() -> p.BlockingScript[Header]:
     """Parse minimal SQLite database header."""
     yield p.string("SQLite format 3\0")
-    page_size = yield p.map_p(lambda v: v if v != 1 else 65536, p.uint16_be)
+    page_size = yield p.map_p(p.uint16_be, lambda v: v if v != 1 else 65536)
     return Header(page_size=page_size)
 
 
@@ -224,7 +224,7 @@ def read_varint(state: p.ParserState) -> p.BlockingResult[int]:
     parser = p.sequence((p.many(continuation_byte), final_byte))
 
     # TODO: check case where 9 bytes are read
-    return p.map_p(process_bytes, parser)(state)
+    return p.map_p(parser, process_bytes)(state)
 
 
 parse_page_type = p.enum(p.uint8, PageType)
@@ -427,7 +427,7 @@ def read_column_value(st: SerialKind) -> p.BlockingParser[ColumnValue]:  # noqa:
         case Blob(size=size):
             return p.bytes_n(size)
         case Text(size=size):
-            return p.map_p(lambda b: b.decode(), p.bytes_n(size))
+            return p.map_p(p.bytes_n(size), lambda b: b.decode())
         case SerialType.NULL:
             return p.pure(None)
         case SerialType.INT8:
